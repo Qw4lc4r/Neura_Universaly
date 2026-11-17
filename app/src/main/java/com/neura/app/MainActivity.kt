@@ -1,9 +1,12 @@
 package com.neura.app
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.core.view.WindowCompat
 import androidx.compose.foundation.layout.imePadding
@@ -25,7 +28,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -90,6 +92,7 @@ fun NeuraApp() {
     var temperature by remember { mutableStateOf(store.string("temperature", "1")) }
     var isDark by remember { mutableStateOf(store.bool("dark", true)) }
     var input by remember { mutableStateOf("") }
+    var pendingAttachments by remember { mutableStateOf<List<Attachment>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
     var streaming by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
@@ -101,6 +104,15 @@ fun NeuraApp() {
     var activeJob by remember { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
+    val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        val resolver = context.contentResolver
+        val granted = mutableListOf<Attachment>()
+        uris.forEach { uri ->
+            runCatching { resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            granted += buildAttachmentFromUri(context, uri)
+        }
+        pendingAttachments = (pendingAttachments + granted).distinctBy { it.uri }
+    }
     val scheme = if (isDark) darkColorScheme(
         primary = accent, onPrimary = Color(0xFF19231E), background = backgroundDark, onBackground = Color(0xFFE3E8E4),
         surface = surfaceDark, onSurface = Color(0xFFE3E8E4), surfaceVariant = Color(0xFF272B2B),
@@ -113,7 +125,7 @@ fun NeuraApp() {
     fun newChat() {
         if (busy) activeJob?.cancel()
         val chat = Conversation()
-        persist(listOf(chat) + chats); changeChat(chat); input = ""
+        persist(listOf(chat) + chats); changeChat(chat); input = ""; pendingAttachments = emptyList()
     }
     fun updateChat(chatId: String, transform: (Conversation) -> Conversation) {
         persist(chats.map { if (it.id == chatId) transform(it).copy(updatedAt = System.currentTimeMillis()) else it })
@@ -122,22 +134,33 @@ fun NeuraApp() {
         if (busy) return
         if (keyInput.isBlank() && provider != "custom") { error = "Укажи API-ключ в настройках"; return }
         if (model.isBlank()) { error = "Укажи ID модели"; return }
+        if (!regeneration && text.isBlank() && pendingAttachments.isEmpty()) return
         var id = currentId
         if (chats.none { it.id == id }) {
             val chat = Conversation(); persist(listOf(chat) + chats); id = chat.id; currentId = id
         }
         val before = chats.first { it.id == id }
-        val history = if (regeneration) before.messages else before.messages + Message(role = "user", text = text.trim())
+        val userMessage = Message(role = "user", text = text.trim(), attachments = pendingAttachments)
+        val history = if (regeneration) before.messages else before.messages + userMessage
         if (!regeneration) {
             input = ""
-            updateChat(id) { it.copy(title = if (it.messages.isEmpty()) text.trim().take(48) else it.title, messages = history) }
+            pendingAttachments = emptyList()
+            updateChat(id) { it.copy(title = if (it.messages.isEmpty()) (text.ifBlank { "Сообщение с вложениями" }).trim().take(48) else it.title, messages = history) }
         }
         error = ""; streaming = ""; busy = true
         val targetId = id
         activeJob = scope.launch {
             val key = keyInput.trim(); val selectedModel = model.trim()
             try {
-                api.stream(provider, endpoint, key, selectedModel, systemPrompt, web && ApiCapabilities.web(provider, selectedModel), reasoning && ApiCapabilities.reasoning(provider, selectedModel),
+                api.stream(
+                    context.applicationContext,
+                    provider,
+                    endpoint,
+                    key,
+                    selectedModel,
+                    systemPrompt,
+                    web && ApiCapabilities.web(provider, selectedModel),
+                    reasoning && ApiCapabilities.reasoning(provider, selectedModel),
                     maxTokens.toIntOrNull()?.coerceIn(1, 32000) ?: 4096,
                     temperature.toDoubleOrNull()?.coerceIn(0.0, 1.0) ?: 1.0,
                     history
@@ -146,7 +169,6 @@ fun NeuraApp() {
                 if (result.isNotBlank()) updateChat(targetId) { it.copy(messages = it.messages + Message(role = "assistant", text = result)) }
                 else error = "Модель завершила ответ без текста"
             } catch (e: CancellationException) {
-                // Preserve a stopped response so it isn't lost.
                 val partial = streaming
                 if (partial.isNotBlank()) updateChat(targetId) { it.copy(messages = it.messages + Message(role = "assistant", text = partial)) }
             } catch (e: Exception) {
@@ -159,7 +181,15 @@ fun NeuraApp() {
     fun exportChat(chat: Conversation) {
         val content = buildString {
             append("# ").append(chat.title).append("\n\n")
-            chat.messages.forEach { append("## ").append(if (it.role == "user") "Вы" else "AI").append("\n\n").append(it.text).append("\n\n") }
+            chat.messages.forEach {
+                append("## ").append(if (it.role == "user") "Вы" else "AI").append("\n\n")
+                append(it.text).append("\n")
+                if (it.attachments.isNotEmpty()) {
+                    append("\nВложения:\n")
+                    it.attachments.forEach { a -> append("- ").append(a.name).append(" (").append(a.mimeType).append(")\n") }
+                }
+                append("\n")
+            }
         }
         context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"; putExtra(Intent.EXTRA_TEXT, content); putExtra(Intent.EXTRA_SUBJECT, chat.title)
@@ -321,13 +351,18 @@ fun NeuraApp() {
                                 Text(Providers.name(provider), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                             }
                             Spacer(Modifier.height(8.dp))
+                            PendingAttachmentsRow(pendingAttachments) { remove -> pendingAttachments = pendingAttachments.filterNot { it.id == remove.id } }
+                            if (pendingAttachments.isNotEmpty()) Spacer(Modifier.height(8.dp))
                             Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FilledTonalIconButton(onClick = { attachmentPicker.launch(arrayOf("*/*")) }, modifier = Modifier.size(48.dp), enabled = !busy) {
+                                    Icon(Icons.Default.AttachFile, contentDescription = "Вложить")
+                                }
                                 OutlinedTextField(input, { input = it }, modifier = Modifier.weight(1f),
                                     placeholder = { Text("Спроси что-нибудь…") }, shape = RoundedCornerShape(14.dp),
                                     maxLines = 6, minLines = 1, enabled = !busy)
                                 FilledIconButton(onClick = {
-                                    if (busy) activeJob?.cancel() else if (input.isNotBlank()) send(input)
-                                }, modifier = Modifier.size(48.dp), enabled = busy || input.isNotBlank(), shape = CircleShape) {
+                                    if (busy) activeJob?.cancel() else if (input.isNotBlank() || pendingAttachments.isNotEmpty()) send(input)
+                                }, modifier = Modifier.size(48.dp), enabled = busy || input.isNotBlank() || pendingAttachments.isNotEmpty(), shape = CircleShape) {
                                     Icon(if (busy) Icons.Default.Stop else Icons.AutoMirrored.Filled.Send, if (busy) "Остановить" else "Отправить")
                                 }
                             }
@@ -336,7 +371,7 @@ fun NeuraApp() {
                                     CircularProgressIndicator(Modifier.size(11.dp), strokeWidth = 1.5.dp)
                                     Spacer(Modifier.width(7.dp))
                                 }
-                                Text(if (busy) "Ответ формируется · нажми стоп" else "Поиск и размышления зависят от модели",
+                                Text(if (busy) "Ответ формируется · нажми стоп" else "Можно вкладывать изображения и файлы",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
                             }
                         }
@@ -428,7 +463,11 @@ private fun MessageBubble(message: Message, isStreaming: Boolean = false, onCopy
         }
         Surface(shape = RoundedCornerShape(if (isUser) 16.dp else 6.dp), color = if (isUser) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.background,
             modifier = if (isUser) Modifier.widthIn(max = 340.dp) else Modifier.fillMaxWidth()) {
-            SelectionContainer { MarkdownText(message.text, modifier = Modifier.padding(14.dp)) }
+            Column {
+                if (message.text.isNotBlank()) SelectionContainer { MarkdownText(message.text, modifier = Modifier.padding(14.dp)) }
+                MessageAttachments(message.attachments)
+                if (!isUser) AssistantImageGallery(message.text)
+            }
         }
         if (!isStreaming) Row(horizontalArrangement = Arrangement.spacedBy(1.dp)) {
             if (onCopy != null) TinyAction(Icons.Default.ContentCopy, "Копировать", onCopy)
