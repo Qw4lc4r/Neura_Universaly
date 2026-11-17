@@ -192,18 +192,27 @@ fun saveGeneratedImage(context: Context, attachment: Attachment) {
 }
 
 @Composable
-fun MessageAttachments(attachments: List<Attachment>, allowDownload: Boolean = false) {
+fun MessageAttachments(
+    attachments: List<Attachment>,
+    allowDownload: Boolean = false,
+    onImageClick: (ImagePreview) -> Unit = {}
+) {
     if (attachments.isEmpty()) return
     val context = LocalContext.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 14.dp)) {
         attachments.forEach { attachment ->
-            if (isImageMime(attachment.mimeType)) {
+            if (attachment.mimeType.startsWith("audio/") || attachment.mimeType.startsWith("video/")) {
+                MediaAttachmentCard(attachment, allowDownload)
+            } else if (isImageMime(attachment.mimeType)) {
                 Surface(shape = RoundedCornerShape(14.dp), tonalElevation = 1.dp, modifier = Modifier.fillMaxWidth()) {
                     Column {
                         AsyncImage(
                             model = attachment.uri,
                             contentDescription = attachment.name,
-                            modifier = Modifier.fillMaxWidth().aspectRatio(4f / 3f).clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+                            modifier = Modifier.fillMaxWidth().aspectRatio(4f / 3f)
+                                .clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { onImageClick(ImagePreview(attachment.uri, attachment.name, attachment)) },
                             contentScale = ContentScale.Crop
                         )
                         Row(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -242,7 +251,7 @@ fun MessageAttachments(attachments: List<Attachment>, allowDownload: Boolean = f
 }
 
 @Composable
-fun AssistantImageGallery(text: String) {
+fun AssistantImageGallery(text: String, onImageClick: (ImagePreview) -> Unit = {}) {
     val urls = remember(text) { extractImageUrls(text) }
     if (urls.isEmpty()) return
     val context = LocalContext.current
@@ -253,7 +262,9 @@ fun AssistantImageGallery(text: String) {
                     AsyncImage(
                         model = url,
                         contentDescription = "Картинка из ответа",
-                        modifier = Modifier.fillMaxWidth().aspectRatio(4f / 3f).background(MaterialTheme.colorScheme.surfaceVariant),
+                        modifier = Modifier.fillMaxWidth().aspectRatio(4f / 3f)
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .clickable { onImageClick(ImagePreview(url, "Изображение")) },
                         contentScale = ContentScale.Crop
                     )
                     Row(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {

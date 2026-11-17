@@ -68,17 +68,17 @@ object Providers {
 }
 
 object ApiCapabilities {
-    fun web(provider: String, model: String): Boolean = when (provider) {
-        "anthropic" -> true
-        "gemini" -> model.startsWith("gemini-")
-        "openai" -> true
-        else -> false
+    fun web(protocol: String, model: String): Boolean = when (protocol) {
+        ApiProtocols.ANTHROPIC -> true
+        ApiProtocols.GEMINI -> true
+        ApiProtocols.OPENAI -> true
+        else -> false // Non-standard tool names cannot safely be guessed.
     }
 
-    fun reasoning(provider: String, model: String): Boolean = when (provider) {
-        "anthropic" -> model.startsWith("claude-")
-        "gemini" -> model.startsWith("gemini-2.5") || model.startsWith("gemini-3")
-        "openai" -> model.startsWith("o") || model.startsWith("gpt-5") || model.startsWith("gpt-6")
+    fun reasoning(protocol: String, model: String): Boolean = when (protocol) {
+        ApiProtocols.ANTHROPIC -> model.startsWith("claude-")
+        ApiProtocols.GEMINI -> true
+        ApiProtocols.OPENAI -> model.startsWith("o") || model.startsWith("gpt-5") || model.startsWith("gpt-6")
         else -> false
     }
 }
@@ -98,7 +98,7 @@ class UniversalApi {
 
     suspend fun stream(
         context: Context,
-        provider: String,
+        protocol: String,
         endpoint: String,
         key: String,
         model: String,
@@ -124,18 +124,21 @@ class UniversalApi {
         require(parsed.rawUserInfo == null) { "В URL нельзя указывать логин или пароль" }
         require(parsed.host != "example.com") { "Укажи настоящий адрес своего API" }
 
-        if (imageMode && (imageApi || provider == "openai" || provider == "gemini")) {
-            generateImages(context, provider, base, key, model, history, onText, onImage)
+        if (imageMode && ApiProtocols.imageRoute(protocol, imageApi) != "chat_images") {
+            require(ApiProtocols.imageRoute(protocol, imageApi) != "unsupported") {
+                "У выбранного протокола нет Image API. Выбери другой протокол подключения."
+            }
+            generateImages(context, protocol, base, key, model, history, onText, onImage)
             return@withContext
         }
         val preparedHistory = history.map { it to prepareAttachments(context, it.attachments) }
         val payload = JSONObject()
         val url: String
         val requestBuilder: Request.Builder
-        val useResponses = provider == "openai" && (web || reasoning)
+        val useResponses = protocol == ApiProtocols.OPENAI && (web || reasoning)
 
-        when (provider) {
-            "anthropic" -> {
+        when (protocol) {
+            ApiProtocols.ANTHROPIC -> {
                 url = "$base/messages"
                 payload.put("model", model).put("max_tokens", maxTokens).put("stream", true)
                 if (systemPrompt.isNotBlank()) payload.put("system", systemPrompt)
@@ -170,7 +173,7 @@ class UniversalApi {
                 requestBuilder = Request.Builder().header("x-api-key", key).header("anthropic-version", "2023-06-01")
             }
 
-            "gemini" -> {
+            ApiProtocols.GEMINI -> {
                 val safeModel = URLEncoder.encode(model, "UTF-8").replace("+", "%20")
                 url = "$base/models/$safeModel:streamGenerateContent?alt=sse"
                 val contents = JSONArray()
@@ -203,9 +206,9 @@ class UniversalApi {
                 requestBuilder = Request.Builder().header("x-goog-api-key", key)
             }
 
-            "openai" -> {
+            ApiProtocols.OPENAI -> {
                 url = if (useResponses) "$base/responses" else "$base/chat/completions"
-                payload.put("model", model).put("stream", true)
+                payload.put("model", model).put("stream", if (useResponses) true else !imageMode)
                 if (useResponses) {
                     payload.put("max_output_tokens", maxTokens)
                     if (systemPrompt.isNotBlank()) payload.put("instructions", systemPrompt)
@@ -226,6 +229,7 @@ class UniversalApi {
                     if (reasoning) payload.put("reasoning", JSONObject().put("effort", "medium"))
                 } else {
                     payload.put("temperature", temperature).put("max_tokens", maxTokens)
+                    if (imageMode) payload.put("modalities", JSONArray().put("text").put("image"))
                     val msgs = JSONArray()
                     if (systemPrompt.isNotBlank()) msgs.put(JSONObject().put("role", "system").put("content", systemPrompt))
                     preparedHistory.filter { it.first.text.isNotBlank() || it.second.isNotEmpty() }.forEach { (m, prepared) ->
@@ -238,7 +242,7 @@ class UniversalApi {
 
             else -> {
                 url = "$base/chat/completions"
-                payload.put("model", model).put("stream", true)
+                payload.put("model", model).put("stream", !imageMode)
                 payload.put("temperature", temperature).put("max_tokens", maxTokens)
                 if (imageMode) payload.put("modalities", JSONArray().put("text").put("image"))
                 val msgs = JSONArray()
@@ -249,12 +253,13 @@ class UniversalApi {
                 payload.put("messages", msgs)
                 requestBuilder = Request.Builder()
                 if (key.isNotBlank()) requestBuilder.header("Authorization", "Bearer $key")
-                if (provider == "openrouter") requestBuilder.header("HTTP-Referer", "https://github.com/")
+                if (protocol == ApiProtocols.OPENROUTER) requestBuilder.header("HTTP-Referer", "https://github.com/")
             }
         }
 
+        val unstreamedChatImage = imageMode && !imageApi && !useResponses && protocol != ApiProtocols.GEMINI
         val req = requestBuilder.url(url)
-            .header("Accept", "text/event-stream")
+            .header("Accept", if (unstreamedChatImage) "application/json" else "text/event-stream")
             .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
 
@@ -267,6 +272,14 @@ class UniversalApi {
                     val raw = response.body?.string().orEmpty()
                     throw ApiHttpException.from(response.code, raw, response.header("Retry-After"))
                 }
+                if (unstreamedChatImage) {
+                    val raw = response.body?.string().orEmpty()
+                    val obj = JSONObject(raw)
+                    val choice = obj.optJSONArray("choices")?.optJSONObject(0)
+                        ?: throw IllegalStateException("Модель не вернула изображение или текст")
+                    consumeCompatibleChoice(context, choice, onText, onImage)
+                    return@use
+                }
                 val source = response.body?.source() ?: error("Пустой ответ API")
                 var ended = false
                 while (true) {
@@ -277,8 +290,8 @@ class UniversalApi {
                     if (raw == "[DONE]") { ended = true; break }
                     if (raw.isBlank()) continue
                     val obj = runCatching { JSONObject(raw) }.getOrNull() ?: continue
-                    when (provider) {
-                        "anthropic" -> when (obj.optString("type")) {
+                    when (protocol) {
+                        ApiProtocols.ANTHROPIC -> when (obj.optString("type")) {
                             "content_block_start" -> {
                                 val block = obj.optJSONObject("content_block")
                                 if (block?.optString("type") == "text") block.optString("text").takeIf { it.isNotEmpty() }?.let { onText(it) }
@@ -290,7 +303,7 @@ class UniversalApi {
                             "message_stop" -> ended = true
                             "error" -> throw IllegalStateException(obj.optJSONObject("error")?.optString("message") ?: "Ошибка Anthropic")
                         }
-                        "gemini" -> {
+                        ApiProtocols.GEMINI -> {
                             val parts = obj.optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
                             if (parts != null) {
                                 for (i in 0 until parts.length()) {
@@ -316,18 +329,8 @@ class UniversalApi {
                                 }
                             } else {
                                 val first = obj.optJSONArray("choices")?.optJSONObject(0)
-                                val delta = first?.optJSONObject("delta")
-                                val text = delta?.optString("content")
-                                if (!text.isNullOrEmpty()) onText(text)
-                                val images = delta?.optJSONArray("images")
-                                if (images != null) for (i in 0 until images.length()) {
-                                    val image = images.optJSONObject(i) ?: continue
-                                    val imageUrl = image.optJSONObject("image_url")?.optString("url")
-                                        ?: image.optString("image_url")
-                                    if (imageUrl.startsWith("data:image/")) {
-                                        val mime = imageUrl.substringAfter("data:").substringBefore(';')
-                                        saveEncodedImage(context, imageUrl.substringAfter("base64,"), mime)?.let { onImage(it) }
-                                    }
+                                if (first != null) {
+                                    consumeCompatibleChoice(context, first, onText, onImage)
                                 }
                                 if (first != null && first.has("finish_reason") && !first.isNull("finish_reason")) ended = true
                                 if (obj.has("error")) throw IllegalStateException(obj.optJSONObject("error")?.optString("message") ?: "Ошибка API")
@@ -335,7 +338,7 @@ class UniversalApi {
                         }
                     }
                 }
-                if (!ended && provider != "gemini") {
+                if (!ended && protocol != ApiProtocols.GEMINI) {
                     // Some compatible providers close the socket to finish.
                 }
             }
@@ -344,8 +347,54 @@ class UniversalApi {
         }
     }
 
+    private suspend fun consumeCompatibleChoice(
+        context: Context, choice: JSONObject,
+        onText: suspend (String) -> Unit,
+        onImage: suspend (Attachment) -> Unit
+    ) {
+        val message = choice.optJSONObject("delta") ?: choice.optJSONObject("message") ?: return
+        val parts = message.optJSONArray("content")
+        if (parts != null) {
+            for (i in 0 until parts.length()) {
+                val part = parts.optJSONObject(i) ?: continue
+                when (part.optString("type")) {
+                    "text", "output_text" -> part.optString("text").takeIf { it.isNotBlank() }?.let { onText(it) }
+                    "image", "image_url" -> consumeImageValue(
+                        context,
+                        part.optJSONObject("image_url")?.optString("url")
+                            ?: part.optString("image_url").ifBlank { part.optString("url") },
+                        onText, onImage
+                    )
+                }
+            }
+        } else {
+            message.optString("content").takeIf { it.isNotBlank() }?.let { onText(it) }
+        }
+        val images = message.optJSONArray("images") ?: JSONArray()
+        for (i in 0 until images.length()) {
+            val item = images.optJSONObject(i) ?: continue
+            val imageUrl = item.optJSONObject("image_url")?.optString("url")
+                ?: item.optString("image_url").ifBlank { item.optString("url") }
+            consumeImageValue(context, imageUrl, onText, onImage)
+        }
+    }
+
+    private suspend fun consumeImageValue(
+        context: Context, value: String,
+        onText: suspend (String) -> Unit,
+        onImage: suspend (Attachment) -> Unit
+    ) {
+        when {
+            value.startsWith("data:image/") && value.contains("base64,") -> {
+                val mime = value.substringAfter("data:").substringBefore(';')
+                saveEncodedImage(context, value.substringAfter("base64,"), mime)?.let { onImage(it) }
+            }
+            value.startsWith("https://") -> onText("\n![Изображение]($value)")
+        }
+    }
+
     private suspend fun generateImages(
-        context: Context, provider: String, base: String, key: String, model: String,
+        context: Context, protocol: String, base: String, key: String, model: String,
         history: List<Message>, onText: suspend (String) -> Unit,
         onImage: suspend (Attachment) -> Unit
     ) {
@@ -355,8 +404,8 @@ class UniversalApi {
         val payload = JSONObject().put("model", model).put("prompt", prompt).put("n", 1)
         val url: String
         val builder = Request.Builder().header("Accept", "application/json")
-        when (provider) {
-            "openrouter", "custom" -> {
+        when (protocol) {
+            ApiProtocols.OPENROUTER -> {
                 url = "$base/images"
                 if (key.isNotBlank()) builder.header("Authorization", "Bearer $key")
                 // Reference images need a compatible image endpoint; unsupported models may reject them.
@@ -370,12 +419,16 @@ class UniversalApi {
                     }
                 }
             }
-            "openai" -> {
+            ApiProtocols.OPENAI_COMPAT -> {
+                url = "$base/images/generations"
+                if (key.isNotBlank()) builder.header("Authorization", "Bearer $key")
+            }
+            ApiProtocols.OPENAI -> {
                 url = "$base/images/generations"
                 builder.header("Authorization", "Bearer $key")
                 // GPT Image endpoints return base64 by default; legacy response_format is not required.
             }
-            "gemini" -> {
+            ApiProtocols.GEMINI -> {
                 val safeModel = java.net.URLEncoder.encode(model, "UTF-8").replace("+", "%20")
                 url = "$base/models/$safeModel:generateContent"
                 builder.header("x-goog-api-key", key)
@@ -389,7 +442,7 @@ class UniversalApi {
                     .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("TEXT").put("IMAGE")))
                 return postImageRequest(context, builder, url, geminiPayload, true, onText, onImage)
             }
-            else -> error("Генерация изображений не поддерживается этим API. Выбери OpenRouter, OpenAI или Gemini.")
+            else -> error("Для выбранного протокола генерация изображений не поддерживается")
         }
         postImageRequest(context, builder, url, payload, false, onText, onImage)
     }

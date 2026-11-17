@@ -1,6 +1,8 @@
 package com.neura.app
 
 import android.content.Intent
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -32,7 +34,7 @@ import androidx.compose.ui.unit.sp
 
 @Composable
 fun ChatScreen(
-    chat: Conversation?, provider: String, model: String, imageMode: Boolean, web: Boolean, reasoning: Boolean,
+    chat: Conversation?, provider: String, protocol: String, model: String, imageMode: Boolean, mediaRoute: String, web: Boolean, reasoning: Boolean,
     input: String, onInput: (String) -> Unit, pending: List<Attachment>,
     onPickFile: () -> Unit, onRemoveFile: (Attachment) -> Unit,
     busy: Boolean, streaming: String, streamingImages: List<Attachment>,
@@ -44,6 +46,7 @@ fun ChatScreen(
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    var imagePreview by remember { mutableStateOf<ImagePreview?>(null) }
     val messages = chat?.messages ?: emptyList()
     val state = rememberLazyListState()
     val itemCount = messages.size + if (busy) 1 else 0
@@ -73,18 +76,31 @@ fun ChatScreen(
         if (messages.isEmpty() && !busy) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 30.dp), verticalArrangement = Arrangement.spacedBy(15.dp)) {
-                    Text("N / 05", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, letterSpacing = 3.sp, fontFamily = FontFamily.Monospace)
+                    Text("N / 1.1", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, letterSpacing = 3.sp, fontFamily = FontFamily.Monospace)
                     Spacer(Modifier.height(18.dp))
-                    Text("С чего\nначнём?", fontSize = 49.sp, lineHeight = 55.sp,
+                    Text("Создадим\nчто-то новое.", fontSize = 46.sp, lineHeight = 55.sp,
                         fontFamily = FontFamily.Serif, fontWeight = FontWeight.Normal, letterSpacing = (-1).sp)
                     Spacer(Modifier.height(1.dp))
-                    Text("Один интерфейс. Любые модели. Твои ключи.",
+                    Text("Свободное пространство для слов, звука и изображения.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(22.dp))
                     DividerLabel("НАПРАВЛЕНИЯ")
-                    PromptStarter("01", "Разобраться в сложной теме") { onInput(it) }
-                    PromptStarter("02", "Написать или проверить код") { onInput(it) }
-                    PromptStarter("03", "Создать изображение") { onInput(it) }
+                    when (mediaRoute) {
+                        MediaRoute.VIDEO -> {
+                            PromptStarter("01", "Волны на рассвете, медленное движение камеры") { onInput(it) }
+                            PromptStarter("02", "Вечерний мегаполис с высоты") { onInput(it) }
+                        }
+                        MediaRoute.SPEECH -> {
+                            PromptStarter("01", "Привет, это Neura. Приятно познакомиться!") { onInput(it) }
+                        }
+                        MediaRoute.TRANSCRIPTION -> Text("Прикрепи аудиофайл и нажми отправить.",
+                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                        else -> {
+                            PromptStarter("01", "Разобраться в сложной теме") { onInput(it) }
+                            PromptStarter("02", "Написать или проверить код") { onInput(it) }
+                            PromptStarter("03", "Создать изображение") { onInput(it) }
+                        }
+                    }
                 }
             }
         } else {
@@ -93,10 +109,11 @@ fun ChatScreen(
                 verticalArrangement = Arrangement.spacedBy(23.dp)) {
                 items(messages, key = { it.id }) { message ->
                     val isLast = message.id == messages.lastOrNull()?.id
-                    PremiumMessage(message,
+                    PremiumMessage(message, modifier = Modifier.animateItem(),
+                        onImageClick = { imagePreview = it },
                         onCopy = { clipboard.setText(AnnotatedString(message.text)) },
                         onEdit = if (message.role == "user" && !busy) ({ onEdit(message) }) else null,
-                        onRegenerate = if (message.role == "assistant" && isLast && !busy) onRegenerate else null,
+                        onRegenerate = if (message.role == "assistant" && isLast && !busy && mediaRoute != MediaRoute.VIDEO) onRegenerate else null,
                         onShare = {
                             context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
                                 type = "text/plain"; putExtra(Intent.EXTRA_TEXT, message.text)
@@ -105,7 +122,11 @@ fun ChatScreen(
                     )
                 }
                 if (busy) item {
-                    PremiumMessage(Message(role = "assistant", text = streaming.ifBlank { if (streamingImages.isEmpty()) "Создаю ответ…" else "" }, attachments = streamingImages), isStreaming = true)
+                    PremiumMessage(
+                        Message(role = "assistant", text = streaming.ifBlank { if (streamingImages.isEmpty()) "Создаю ответ…" else "" }, attachments = streamingImages),
+                        isStreaming = true,
+                        onImageClick = { imagePreview = it }
+                    )
                 }
             }
         }
@@ -122,16 +143,19 @@ fun ChatScreen(
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = onOpenModels) { Text("Другая модель") }
-                        OutlinedButton(onClick = onRetry, enabled = !busy && messages.lastOrNull()?.role == "user") { Text("Повторить") }
+                        OutlinedButton(onClick = onRetry, enabled = !busy && messages.lastOrNull()?.role == "user" && mediaRoute != MediaRoute.VIDEO) { Text("Повторить") }
                     }
                 }
             }
         }
         Composer(
-            provider = provider, model = model, imageMode = imageMode, web = web, reasoning = reasoning,
+            provider = provider, model = model, imageMode = imageMode, mediaRoute = mediaRoute, web = web, reasoning = reasoning,
             input = input, onInput = onInput, pending = pending, onPickFile = onPickFile, onRemoveFile = onRemoveFile,
             busy = busy, onSend = onSend, onStop = onStop, onWeb = onWeb, onReasoning = onReasoning
         )
+    }
+    imagePreview?.let { preview ->
+        ImageViewerDialog(image = preview, onDismiss = { imagePreview = null })
     }
 }
 
@@ -156,12 +180,13 @@ private fun PromptStarter(index: String, prompt: String, onClick: (String) -> Un
 
 @Composable
 private fun PremiumMessage(
-    message: Message, isStreaming: Boolean = false,
+    message: Message, isStreaming: Boolean = false, modifier: Modifier = Modifier,
+    onImageClick: (ImagePreview) -> Unit = {},
     onCopy: (() -> Unit)? = null, onEdit: (() -> Unit)? = null,
     onRegenerate: (() -> Unit)? = null, onShare: (() -> Unit)? = null
 ) {
     val isUser = message.role == "user"
-    Column(Modifier.fillMaxWidth(), horizontalAlignment = if (isUser) Alignment.End else Alignment.Start) {
+    Column(modifier.fillMaxWidth().animateContentSize(), horizontalAlignment = if (isUser) Alignment.End else Alignment.Start) {
         if (!isUser) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 12.dp)) {
                 Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(8.dp)) {
@@ -186,8 +211,8 @@ private fun PremiumMessage(
                 if (message.text.isNotBlank()) SelectionContainer {
                     MarkdownText(message.text, Modifier.padding(if (isUser) 15.dp else 5.dp))
                 }
-                MessageAttachments(message.attachments, allowDownload = !isUser)
-                if (!isUser) AssistantImageGallery(message.text)
+                MessageAttachments(message.attachments, allowDownload = !isUser, onImageClick = onImageClick)
+                if (!isUser) AssistantImageGallery(message.text, onImageClick = onImageClick)
             }
         }
         if (!isStreaming) Row(horizontalArrangement = Arrangement.spacedBy(1.dp),
@@ -209,7 +234,7 @@ private fun MicroAction(icon: androidx.compose.ui.graphics.vector.ImageVector, t
 
 @Composable
 private fun Composer(
-    provider: String, model: String, imageMode: Boolean, web: Boolean, reasoning: Boolean,
+    provider: String, model: String, imageMode: Boolean, mediaRoute: String, web: Boolean, reasoning: Boolean,
     input: String, onInput: (String) -> Unit, pending: List<Attachment>,
     onPickFile: () -> Unit, onRemoveFile: (Attachment) -> Unit,
     busy: Boolean, onSend: (String) -> Unit, onStop: () -> Unit,
@@ -220,10 +245,18 @@ private fun Composer(
         Column(Modifier.fillMaxWidth().padding(start = 13.dp, end = 13.dp, top = 12.dp, bottom = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SmallModeChip("SEARCH", Icons.Default.TravelExplore, web, ApiCapabilities.web(provider, model), { onWeb(!web) })
-                SmallModeChip("THINK", Icons.Default.Psychology, reasoning, ApiCapabilities.reasoning(provider, model), { onReasoning(!reasoning) })
+                if (mediaRoute == MediaRoute.CHAT) {
+                    SmallModeChip("SEARCH", Icons.Default.TravelExplore, web, ApiCapabilities.web(protocol, model), { onWeb(!web) })
+                    SmallModeChip("THINK", Icons.Default.Psychology, reasoning, ApiCapabilities.reasoning(protocol, model), { onReasoning(!reasoning) })
+                }
                 Spacer(Modifier.weight(1f))
-                if (imageMode) Text("IMAGE MODE", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
+                Text(when(mediaRoute) {
+                    MediaRoute.IMAGE -> "IMAGE STUDIO"
+                    MediaRoute.SPEECH -> "VOICE / SYNTHESIS"
+                    MediaRoute.TRANSCRIPTION -> "AUDIO / TRANSCRIBE"
+                    MediaRoute.VIDEO -> "MOTION / VIDEO"
+                    else -> "DIALOGUE"
+                }, fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
             }
             PendingAttachmentsRow(pending, onRemoveFile)
             Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
@@ -231,7 +264,13 @@ private fun Composer(
                     Icon(Icons.Default.AttachFile, "Вложить", tint = MaterialTheme.colorScheme.primary)
                 }
                 OutlinedTextField(input, onInput, modifier = Modifier.weight(1f), minLines = 1, maxLines = 5,
-                    enabled = !busy, placeholder = { Text(if (imageMode) "Опиши изображение…" else "Сообщение для нейросети…") },
+                    enabled = !busy, placeholder = { Text(when (mediaRoute) {
+                        MediaRoute.VIDEO -> "Опиши движение и сцену…"
+                        MediaRoute.SPEECH -> "Текст для озвучивания…"
+                        MediaRoute.TRANSCRIPTION -> "Прикрепи запись для расшифровки…"
+                        MediaRoute.IMAGE -> "Опиши изображение…"
+                        else -> "Сообщение для нейросети…"
+                    }) },
                     shape = RoundedCornerShape(14.dp))
                 FilledIconButton(onClick = { if (busy) onStop() else onSend(input) },
                     modifier = Modifier.size(48.dp), enabled = busy || input.isNotBlank() || pending.isNotEmpty()) {
@@ -240,7 +279,7 @@ private fun Composer(
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                Text("NEURA  /  YOUR KEYS · YOUR MODELS", fontFamily = FontFamily.Monospace, fontSize = 9.sp,
+                Text("NEURA   /   1.1   ·   INDEPENDENT BY DESIGN", fontFamily = FontFamily.Monospace, fontSize = 9.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, letterSpacing = 0.7.sp)
             }
         }

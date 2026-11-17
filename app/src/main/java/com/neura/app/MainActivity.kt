@@ -9,6 +9,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -40,16 +42,23 @@ fun NeuraApp() {
     val context = LocalContext.current
     val store = remember { LocalStore(context.applicationContext) }
     val api = remember { UniversalApi() }
+    val mediaApi = remember { MediaApi() }
     val scope = rememberCoroutineScope()
     var chats by remember { mutableStateOf(store.loadChats()) }
     var currentId by remember { mutableStateOf(chats.firstOrNull()?.id ?: "") }
     var page by remember { mutableStateOf("chat") }
     var provider by remember { mutableStateOf(store.string("provider", "openrouter")) }
+    var customProtocol by remember { mutableStateOf(store.string("protocol_custom", ApiProtocols.OPENAI_COMPAT)) }
+    val protocol = ApiProtocols.resolve(provider, customProtocol)
     var endpoint by remember { mutableStateOf(store.string("endpoint_$provider", Providers.endpoint(provider))) }
     var apiKey by remember { mutableStateOf(store.loadKey(provider)) }
     var model by remember { mutableStateOf(store.string("model_$provider", Providers.defaultModel(provider))) }
     var imageMode by remember { mutableStateOf(store.bool("image_mode_$provider", false)) }
     var imageApi by remember { mutableStateOf(store.bool("image_api_$provider", false)) }
+    var mediaRoute by remember { mutableStateOf(store.string("route_$provider", if (imageMode) MediaRoute.IMAGE else MediaRoute.CHAT)) }
+    var speechVoice by remember { mutableStateOf(store.string("speech_voice", "alloy")) }
+    var videoSeconds by remember { mutableStateOf(store.string("video_seconds", "0")) }
+    var videoRatio by remember { mutableStateOf(store.string("video_ratio", "auto")) }
     var web by remember { mutableStateOf(store.bool("web_$provider", false)) }
     var reasoning by remember { mutableStateOf(store.bool("reasoning_$provider", false)) }
     var systemPrompt by remember { mutableStateOf(store.string("system", "Ты внимательный AI-ассистент. Отвечай на языке пользователя.") ) }
@@ -113,12 +122,24 @@ fun NeuraApp() {
         reasoning = store.bool("reasoning_$next")
         imageMode = store.bool("image_mode_$next")
         imageApi = store.bool("image_api_$next")
+        mediaRoute = store.string("route_$next", if (imageMode) MediaRoute.IMAGE else MediaRoute.CHAT)
     }
 
     fun selectModel(item: CatalogModel) {
+        if (!ApiProtocols.canRun(protocol, item.route) ||
+            (protocol == ApiProtocols.GEMINI && item.route == MediaRoute.VIDEO && item.id.startsWith("veo-"))) {
+            error = "Модель доступна в каталоге, но этот протокол не поддерживает её тип запроса"
+            return
+        }
         model = item.id
         imageMode = item.outputImage
         imageApi = item.imageApi
+        mediaRoute = item.route
+        if (mediaRoute == MediaRoute.SPEECH && item.supportedVoices.isNotEmpty() && speechVoice !in item.supportedVoices) {
+            speechVoice = item.supportedVoices.first()
+            store.set("speech_voice", speechVoice)
+        }
+        store.set("route_$provider", mediaRoute)
         store.set("model_$provider", model)
         store.set("image_mode_$provider", imageMode)
         store.set("image_api_$provider", imageApi)
@@ -129,6 +150,7 @@ fun NeuraApp() {
         if (busy) return
         if (apiKey.isBlank() && provider != "custom") { error = "В настройках укажи API-ключ"; return }
         if (model.isBlank()) { error = "Выбери модель"; return }
+        if (!ApiProtocols.canRun(protocol, mediaRoute)) { error = "Для этой модели нужен другой протокол API. Проверь настройки подключения."; return }
         if (!regeneration && text.isBlank() && pending.isEmpty()) return
         var id = currentId
         if (chats.none { it.id == id }) {
@@ -154,16 +176,29 @@ fun NeuraApp() {
                 }
             }
             try {
+                if (mediaRoute in setOf(MediaRoute.SPEECH, MediaRoute.TRANSCRIPTION, MediaRoute.VIDEO)) {
+                    val last = history.lastOrNull { it.role == "user" }
+                        ?: throw IllegalArgumentException("Нет входного сообщения")
+                    val result = mediaApi.execute(
+                        context.applicationContext, protocol, endpoint, apiKey.trim(), model.trim(),
+                        mediaRoute, last.text, last.attachments, speechVoice,
+                        videoSeconds.toIntOrNull()?.coerceIn(0, 60) ?: 0, videoRatio,
+                        onProgress = { detail -> withContext(Dispatchers.Main) { streaming = detail } }
+                    )
+                    streaming = result.text
+                    streamingImages = result.attachments
+                } else {
                 api.stream(
-                    context.applicationContext, provider, endpoint, apiKey.trim(), model.trim(),
-                    systemPrompt, web && ApiCapabilities.web(provider, model),
-                    reasoning && ApiCapabilities.reasoning(provider, model),
+                    context.applicationContext, protocol, endpoint, apiKey.trim(), model.trim(),
+                    systemPrompt, web && ApiCapabilities.web(protocol, model),
+                    reasoning && ApiCapabilities.reasoning(protocol, model),
                     maxTokens.toIntOrNull()?.coerceIn(1, 32000) ?: 4096,
                     temperature.toDoubleOrNull()?.coerceIn(0.0, 1.0) ?: 1.0,
                     history, imageMode, imageApi,
                     onText = { chunk -> withContext(Dispatchers.Main) { streaming += chunk } },
                     onImage = { image -> withContext(Dispatchers.Main) { streamingImages = streamingImages + image } }
                 )
+                }
                 saveResult()
                 if (streaming.isBlank() && streamingImages.isEmpty()) error = "Модель вернула пустой ответ. Проверь её возможности в каталоге."
             } catch (_: CancellationException) {
@@ -209,31 +244,51 @@ fun NeuraApp() {
     BackHandler(page != "chat") { page = "chat" }
     MaterialTheme(colorScheme = colorScheme) {
         Surface(Modifier.fillMaxSize().systemBarsPadding().imePadding(), color = MaterialTheme.colorScheme.background) {
-            when (page) {
+            Crossfade(targetState = page, animationSpec = tween(230), label = "Neura navigation") { activePage ->
+            when (activePage) {
                 "settings" -> SettingsScreen(
-                    provider, apiKey, endpoint, model, imageMode, web, reasoning,
+                    provider, protocol, apiKey, endpoint, model, imageMode, web, reasoning,
                     systemPrompt, maxTokens, temperature, dark,
                     onBack = { page = "chat" },
                     onProvider = ::switchProvider,
+                    onProtocol = { chosen ->
+                        customProtocol = chosen
+                        store.set("protocol_custom", chosen)
+                        if (!ApiProtocols.canRun(chosen, mediaRoute)) {
+                            mediaRoute = MediaRoute.CHAT
+                            imageMode = false; imageApi = false
+                            store.set("route_custom", mediaRoute)
+                            store.set("image_mode_custom", false)
+                            store.set("image_api_custom", false)
+                        }
+                    },
                     onKey = { apiKey = it },
                     onSaveKey = { store.saveKey(apiKey.trim(), provider); Toast.makeText(context, "Ключ сохранён", Toast.LENGTH_SHORT).show() },
                     onEndpoint = { endpoint = it; store.set("endpoint_$provider", it) },
                     onModelLibrary = { page = "models" },
-                    onImageMode = { imageMode = it; imageApi = it; store.set("image_mode_$provider", it); store.set("image_api_$provider", it) },
+                    onImageMode = { imageMode = it; imageApi = it; mediaRoute = if (it) MediaRoute.IMAGE else MediaRoute.CHAT;
+                        store.set("route_$provider", mediaRoute); store.set("image_mode_$provider", it); store.set("image_api_$provider", it) },
                     onWeb = { web = it; store.set("web_$provider", it) },
                     onReasoning = { reasoning = it; store.set("reasoning_$provider", it) },
                     onPrompt = { systemPrompt = it; store.set("system", it) },
                     onTokens = { maxTokens = it; store.set("tokens", it) },
                     onTemperature = { temperature = it; store.set("temperature", it) },
-                    onTheme = { dark = it; store.set("dark", it) }
+                    onTheme = { dark = it; store.set("dark", it) },
+                    voice = speechVoice, onVoice = { speechVoice = it; store.set("speech_voice", it) },
+                    videoSeconds = videoSeconds, onVideoSeconds = { videoSeconds = it; store.set("video_seconds", it) },
+                    videoRatio = videoRatio, onVideoRatio = { videoRatio = it; store.set("video_ratio", it) }
                 )
-                "models" -> ModelLibraryScreen(provider, endpoint, apiKey, model, store,
+                "models" -> ModelLibraryScreen(provider, protocol, endpoint, apiKey, model, store,
                     onBack = { page = "chat" }, onSelect = ::selectModel,
-                    onManual = { id, image ->
-                        model = id; imageMode = image; imageApi = image
+                    onManual = { id, route, dedicatedImage ->
+                        model = id
+                        mediaRoute = route
+                        imageMode = route == MediaRoute.IMAGE
+                        imageApi = imageMode && dedicatedImage
+                        store.set("route_$provider", mediaRoute)
                         store.set("model_$provider", model)
-                        store.set("image_mode_$provider", image)
-                        store.set("image_api_$provider", image)
+                        store.set("image_mode_$provider", imageMode)
+                        store.set("image_api_$provider", imageApi)
                         page = "chat"
                     }
                 )
@@ -241,8 +296,8 @@ fun NeuraApp() {
                     onNew = ::createChat, onRename = { renameId = it.id; renameValue = it.title },
                     onDelete = { deleteId = it.id }, onShare = ::exportChat)
                 else -> ChatScreen(
-                    chat = chats.find { it.id == currentId }, provider = provider, model = model,
-                    imageMode = imageMode, web = web, reasoning = reasoning,
+                    chat = chats.find { it.id == currentId }, provider = provider, protocol = protocol, model = model,
+                    imageMode = imageMode, mediaRoute = mediaRoute, web = web, reasoning = reasoning,
                     input = input, onInput = { input = it }, pending = pending,
                     onPickFile = { filePicker.launch(arrayOf("*/*")) },
                     onRemoveFile = { removed -> pending = pending.filterNot { it.id == removed.id } },
@@ -265,6 +320,7 @@ fun NeuraApp() {
                         }
                     }
                 )
+            }
             }
         }
         if (renameId != null) AlertDialog(onDismissRequest = { renameId = null }, title = { Text("Название чата") },

@@ -27,13 +27,14 @@ import kotlinx.coroutines.CancellationException
 @Composable
 fun ModelLibraryScreen(
     provider: String,
+    protocol: String,
     endpoint: String,
     apiKey: String,
     currentModel: String,
     store: LocalStore,
     onBack: () -> Unit,
     onSelect: (CatalogModel) -> Unit,
-    onManual: (String, Boolean) -> Unit
+    onManual: (String, String, Boolean) -> Unit
 ) {
     var query by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf("Все") }
@@ -41,7 +42,9 @@ fun ModelLibraryScreen(
     var sorting by remember { mutableStateOf("Название") }
     var sortMenu by remember { mutableStateOf(false) }
     var manual by remember { mutableStateOf("") }
-    var manualImage by remember { mutableStateOf(false) }
+    var manualRoute by remember { mutableStateOf(MediaRoute.CHAT) }
+    var manualImageApi by remember { mutableStateOf(true) }
+    var manualRouteMenu by remember { mutableStateOf(false) }
     var manualOpen by remember { mutableStateOf(false) }
     var favorites by remember(provider) { mutableStateOf(store.string("favorites_$provider").split("|").filter { it.isNotBlank() }.toSet()) }
     var recent by remember(provider) { mutableStateOf(store.string("recent_$provider").split("|").filter { it.isNotBlank() }) }
@@ -52,10 +55,10 @@ fun ModelLibraryScreen(
     var error by remember { mutableStateOf("") }
     var revision by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(provider, endpoint, apiKey, revision) {
+    LaunchedEffect(provider, protocol, endpoint, apiKey, revision) {
         loading = true; error = ""; notice = ""
         try {
-            val result = ModelCatalog(context.applicationContext).list(provider, endpoint, apiKey)
+            val result = ModelCatalog(context.applicationContext).list(provider, endpoint, apiKey, protocol)
             models = result.models
             notice = result.notice
         } catch (e: CancellationException) {
@@ -69,13 +72,15 @@ fun ModelLibraryScreen(
     fun availableInChat(model: CatalogModel): Boolean {
         // Non-chat API products are discoverable, but must not be sent to /chat/completions.
         val outputs = model.outputModalities
-        return model.outputImage || "text" in outputs || outputs.isEmpty()
+        return ApiProtocols.canRun(protocol, model.route) &&
+            !(protocol == ApiProtocols.GEMINI && model.route == MediaRoute.VIDEO && model.id.startsWith("veo-"))
     }
     val filtered = remember(query, filter, freeOnly, sorting, models, favorites, recent) {
         models.filter { model ->
             val outputs = model.outputModalities
-            val isAudio = outputs.any { it in setOf("audio", "speech", "transcription") }
-            val isVideo = "video" in outputs
+            val isAudio = outputs.any { it in setOf("audio", "speech", "transcription") } ||
+                model.route in setOf(MediaRoute.SPEECH, MediaRoute.TRANSCRIPTION)
+            val isVideo = "video" in outputs || model.route == MediaRoute.VIDEO
             val isOther = outputs.any { it in setOf("embeddings", "rerank", "decisions") } ||
                 (outputs.isNotEmpty() && outputs.none { it in setOf("text", "image", "audio", "speech", "transcription", "video") })
             (query.isBlank() || model.name.contains(query, true) || model.id.contains(query, true) || model.description.contains(query, true)) &&
@@ -212,8 +217,11 @@ fun ModelLibraryScreen(
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
                             if (entry.outputImage) MiniTag("IMAGE")
                             if ("text" in entry.outputModalities || entry.outputModalities.isEmpty()) MiniTag("CHAT")
-                            if ("video" in entry.outputModalities) MiniTag("VIDEO")
-                            if (entry.outputModalities.any { it in setOf("audio", "speech", "transcription") }) MiniTag("AUDIO")
+                            if (entry.route == MediaRoute.VIDEO || "video" in entry.outputModalities) MiniTag("VIDEO")
+                            if (entry.route == MediaRoute.SPEECH) MiniTag("TEXT → SPEECH")
+                            if (entry.route == MediaRoute.TRANSCRIPTION) MiniTag("SPEECH → TEXT")
+                            if (entry.outputModalities.any { it in setOf("audio", "speech", "transcription") } &&
+                                entry.route !in setOf(MediaRoute.SPEECH, MediaRoute.TRANSCRIPTION)) MiniTag("AUDIO")
                             if ("embeddings" in entry.outputModalities) MiniTag("EMBED")
                             if ("rerank" in entry.outputModalities) MiniTag("RERANK")
                             if ("decisions" in entry.outputModalities) MiniTag("DECISION")
@@ -222,6 +230,20 @@ fun ModelLibraryScreen(
                             if (entry.free) MiniTag("FREE")
                             if (entry.context > 0) MiniTag("${entry.context / 1000}K")
                         }
+                        if (entry.route == MediaRoute.SPEECH && entry.supportedVoices.isNotEmpty()) Text(
+                            "Доступные голоса: ${entry.supportedVoices.take(4).joinToString(", ")}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (selectable && entry.route in setOf(MediaRoute.SPEECH, MediaRoute.TRANSCRIPTION, MediaRoute.VIDEO)) Text(
+                            "${ApiProtocols.label(protocol)} · ${when (entry.route) {
+                                MediaRoute.SPEECH -> "Speech API"
+                                MediaRoute.TRANSCRIPTION -> "Transcription API"
+                                else -> "Video API"
+                            }} · доступность зависит от модели и ключа",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
                         if (!selectable) Text(
                             "Доступно в каталоге · этот тип API ещё не подключён в Neura",
                             style = MaterialTheme.typography.labelSmall,
@@ -238,11 +260,40 @@ fun ModelLibraryScreen(
                     Spacer(Modifier.height(12.dp))
                     OutlinedTextField(manual, { manual = it }, Modifier.fillMaxWidth(), singleLine = true,
                         label = { Text("ID модели") })
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = manualImage, onCheckedChange = { manualImage = it })
-                        Text("Режим генерации изображений")
+                    Box {
+                        OutlinedButton(onClick = { manualRouteMenu = true }, modifier = Modifier.fillMaxWidth()) {
+                            Text("Назначение: " + when (manualRoute) {
+                                MediaRoute.IMAGE -> "Изображение"
+                                MediaRoute.SPEECH -> "Озвучка"
+                                MediaRoute.TRANSCRIPTION -> "Расшифровка"
+                                MediaRoute.VIDEO -> "Видео"
+                                else -> "Чат"
+                            })
+                            Spacer(Modifier.weight(1f))
+                            Icon(Icons.Default.ExpandMore, null)
+                        }
+                        DropdownMenu(manualRouteMenu, onDismissRequest = { manualRouteMenu = false }) {
+                            listOf(
+                                MediaRoute.CHAT to "Текстовый чат",
+                                MediaRoute.IMAGE to "Генерация изображения",
+                                MediaRoute.SPEECH to "Озвучка текста",
+                                MediaRoute.TRANSCRIPTION to "Расшифровка аудио",
+                                MediaRoute.VIDEO to "Генерация видео"
+                            ).forEach { (route, label) ->
+                                DropdownMenuItem(text = { Text(label) }, onClick = { manualRoute = route; manualRouteMenu = false },
+                                    enabled = ApiProtocols.canRun(protocol, route))
+                            }
+                        }
                     }
-                    Button(onClick = { onManual(manual.trim(), manualImage) }, enabled = manual.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Выбрать ID") }
+                    if (manualRoute == MediaRoute.IMAGE && protocol in setOf(ApiProtocols.OPENROUTER, ApiProtocols.OPENAI, ApiProtocols.OPENAI_COMPAT)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = manualImageApi, onCheckedChange = { manualImageApi = it })
+                            Text("Отдельный Image API (иначе Chat API)")
+                        }
+                    }
+                    Button(onClick = { onManual(manual.trim(), manualRoute, manualImageApi) },
+                        enabled = manual.isNotBlank() && ApiProtocols.canRun(protocol, manualRoute),
+                        modifier = Modifier.fillMaxWidth()) { Text("Выбрать ID") }
                 }
                 Spacer(Modifier.height(18.dp))
             }

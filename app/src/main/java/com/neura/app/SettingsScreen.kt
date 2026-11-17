@@ -7,6 +7,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -24,11 +25,12 @@ import androidx.compose.ui.unit.sp
 
 @Composable
 fun SettingsScreen(
-    provider: String, apiKey: String, endpoint: String, model: String,
+    provider: String, protocol: String, apiKey: String, endpoint: String, model: String,
     imageMode: Boolean, web: Boolean, reasoning: Boolean,
     systemPrompt: String, maxTokens: String, temperature: String, dark: Boolean,
     onBack: () -> Unit,
     onProvider: (String) -> Unit,
+    onProtocol: (String) -> Unit,
     onKey: (String) -> Unit,
     onSaveKey: () -> Unit,
     onEndpoint: (String) -> Unit,
@@ -39,9 +41,13 @@ fun SettingsScreen(
     onPrompt: (String) -> Unit,
     onTokens: (String) -> Unit,
     onTemperature: (String) -> Unit,
-    onTheme: (Boolean) -> Unit
+    onTheme: (Boolean) -> Unit,
+    voice: String, onVoice: (String) -> Unit,
+    videoSeconds: String, onVideoSeconds: (String) -> Unit,
+    videoRatio: String, onVideoRatio: (String) -> Unit
 ) {
     var providerMenu by remember { mutableStateOf(false) }
+    var protocolMenu by remember { mutableStateOf(false) }
     var showKey by remember { mutableStateOf(false) }
     var section by remember { mutableStateOf("Подключение") }
 
@@ -55,14 +61,19 @@ fun SettingsScreen(
             }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("Подключение", "Модель", "Диалог", "Внешний вид").forEach { name ->
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("Подключение", "Модель", "Диалог", "Внешний вид").forEachIndexed { index, name ->
                 val active = section == name
-                Surface(onClick = { section = name }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp),
+                Surface(onClick = { section = name }, shape = RoundedCornerShape(12.dp),
                     color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
                     border = BorderStroke(1.dp, if (active) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f) else MaterialTheme.colorScheme.outlineVariant)) {
-                    Text(name, modifier = Modifier.padding(vertical = 11.dp, horizontal = 3.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                        fontSize = 11.sp, lineHeight = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Row(Modifier.padding(vertical = 12.dp, horizontal = 15.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("0${index + 1}", fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(8.dp))
+                        Text(name, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                    }
                 }
             }
         }
@@ -86,6 +97,30 @@ fun SettingsScreen(
                                 }
                             }
                         }
+                        Text("ПРОТОКОЛ ЗАПРОСОВ", style = MaterialTheme.typography.labelSmall, letterSpacing = 1.sp)
+                        Box {
+                            OutlinedButton(
+                                onClick = { if (provider == "custom") protocolMenu = true },
+                                enabled = provider == "custom", modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(ApiProtocols.label(protocol), modifier = Modifier.weight(1f))
+                                if (provider == "custom") Icon(Icons.Default.KeyboardArrowDown, "Выбрать протокол")
+                            }
+                            DropdownMenu(protocolMenu, onDismissRequest = { protocolMenu = false }) {
+                                ApiProtocols.customizable.forEach { item ->
+                                    DropdownMenuItem(text = { Text(ApiProtocols.label(item)) }, onClick = {
+                                        onProtocol(item)
+                                        protocolMenu = false
+                                    })
+                                }
+                            }
+                        }
+                        Text(
+                            if (provider == "custom") "Выбери формат, который действительно реализует твой сервер. Адрес и ID модели сами по себе не определяют протокол."
+                            else "Формат задаётся выбранным провайдером. Для собственного сервера выбери «Свой API». В списке поддержаны несколько протоколов.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         OutlinedTextField(endpoint, onEndpoint, modifier = Modifier.fillMaxWidth(),
                             label = { Text("Адрес API (HTTPS)") }, singleLine = true)
                         OutlinedTextField(apiKey, onKey, modifier = Modifier.fillMaxWidth(), label = { Text("API-ключ") }, singleLine = true,
@@ -100,7 +135,7 @@ fun SettingsScreen(
                             Spacer(Modifier.width(8.dp)); Text("Сохранить ключ")
                         }
                     }
-                    Text("OpenAI, Claude, Gemini, OpenRouter и OpenAI-совместимые сервисы. Доступ к моделям зависит от выбранного API-ключа.",
+                    Text("Доступны форматы OpenAI, OpenRouter, Gemini и Anthropic. Конкретные медиа-возможности зависят от сервера и модели.",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 "Модель" -> {
@@ -116,6 +151,29 @@ fun SettingsScreen(
                         SettingsSwitch("Режим изображения", "Использовать Image API, только для совместимых моделей", imageMode, onImageMode)
                         SettingsSwitch("Поиск в интернете", "Когда провайдер и модель поддерживают инструмент", web, onWeb)
                         SettingsSwitch("Размышления", "Когда модель поддерживает reasoning", reasoning, onReasoning)
+                    }
+                    SettingsPanel {
+                        Text("MEDIA / OUTPUT", fontFamily = FontFamily.Monospace, fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.primary, letterSpacing = 1.4.sp)
+                        Text("Для OpenRouter: голос и параметры видео. Не все модели принимают каждое значение.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedTextField(voice, onVoice, Modifier.fillMaxWidth(), singleLine = true,
+                            label = { Text("Голос для озвучки (например alloy)") })
+                        OutlinedTextField(videoSeconds, onVideoSeconds, Modifier.fillMaxWidth(), singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            label = { Text("Длительность видео · 0 = автоматически") })
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Кадр видео", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                            var ratioMenu by remember { mutableStateOf(false) }
+                            Box {
+                                TextButton(onClick = { ratioMenu = true }) { Text(videoRatio); Icon(Icons.Default.ExpandMore, null) }
+                                DropdownMenu(ratioMenu, onDismissRequest = { ratioMenu = false }) {
+                                    listOf("16:9", "9:16", "1:1", "auto").forEach { choice ->
+                                        DropdownMenuItem(text = { Text(choice) }, onClick = { onVideoRatio(choice); ratioMenu = false })
+                                    }
+                                }
+                            }
+                        }
                     }
                     SettingsPanel {
                         OutlinedTextField(maxTokens, onTokens, Modifier.fillMaxWidth(), label = { Text("Максимум токенов") },
@@ -134,10 +192,10 @@ fun SettingsScreen(
                     }
                 }
                 "Внешний вид" -> {
-                    SettingsIntro("04", "Тихая роскошь", "Минимум элементов, акцент на содержании.")
+                    SettingsIntro("04", "Оформление", "Типографика, цвет и движение без лишних эффектов.")
                     SettingsPanel {
                         SettingsSwitch("Тёмная тема", "Графит / тёплый металл", dark, onTheme)
-                        Text("Neura / EDITION 05", fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary,
+                        Text("NEURA / RELEASE 1.1", fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary,
                             letterSpacing = 2.sp, fontSize = 11.sp)
                     }
                 }
