@@ -61,6 +61,41 @@ object ApiProtocols {
         else -> false
     }
 
-    fun supportsWeb(protocol: String): Boolean = protocol in setOf(OPENAI, GEMINI, ANTHROPIC)
+    fun supportsWeb(protocol: String): Boolean = protocol in setOf(OPENAI, OPENAI_COMPAT, OPENROUTER, GEMINI, ANTHROPIC)
     fun supportsReasoning(protocol: String): Boolean = protocol in setOf(OPENAI, GEMINI, ANTHROPIC)
+}
+
+
+/** Search transport is selected independently from the model/provider.
+ *  There is no standard web-search extension for arbitrary OpenAI-compatible gateways.
+ */
+object WebSearchModes {
+    const val AUTO = "auto"
+    const val CHAT_OPTIONS = "chat_web_search_options"
+    const val OPENROUTER_PLUGIN = "openrouter_web_plugin"
+    const val RESPONSES = "responses_web_search"
+
+    fun label(mode: String): String = when (mode) {
+        AUTO -> "Автоматически"
+        CHAT_OPTIONS -> "Chat Completions · web_search_options"
+        OPENROUTER_PLUGIN -> "OpenRouter · web plugin"
+        RESPONSES -> "Responses API · web_search"
+        else -> "Автоматически"
+    }
+
+    fun options(protocol: String): List<String> = when (protocol) {
+        ApiProtocols.OPENAI_COMPAT, ApiProtocols.OPENROUTER -> listOf(AUTO, CHAT_OPTIONS, OPENROUTER_PLUGIN, RESPONSES)
+        ApiProtocols.OPENAI -> listOf(AUTO, RESPONSES)
+        else -> listOf(AUTO)
+    }
+
+    fun resolve(protocol: String, selected: String): String {
+        if (selected != AUTO && selected in options(protocol)) return selected
+        return when (protocol) {
+            ApiProtocols.OPENROUTER -> OPENROUTER_PLUGIN
+            ApiProtocols.OPENAI -> RESPONSES
+            ApiProtocols.OPENAI_COMPAT -> CHAT_OPTIONS
+            else -> AUTO // Gemini and Anthropic use their own native search tools.
+        }
+    }
 }

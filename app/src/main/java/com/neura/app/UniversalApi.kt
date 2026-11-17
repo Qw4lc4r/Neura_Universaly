@@ -71,8 +71,8 @@ object ApiCapabilities {
     fun web(protocol: String, model: String): Boolean = when (protocol) {
         ApiProtocols.ANTHROPIC -> true
         ApiProtocols.GEMINI -> true
-        ApiProtocols.OPENAI -> true
-        else -> false // Non-standard tool names cannot safely be guessed.
+        ApiProtocols.OPENAI, ApiProtocols.OPENAI_COMPAT, ApiProtocols.OPENROUTER -> true
+        else -> false
     }
 
     fun reasoning(protocol: String, model: String): Boolean = when (protocol) {
@@ -104,6 +104,7 @@ class UniversalApi {
         model: String,
         systemPrompt: String,
         web: Boolean,
+        webMode: String,
         reasoning: Boolean,
         maxTokens: Int,
         temperature: Double,
@@ -135,7 +136,11 @@ class UniversalApi {
         val payload = JSONObject()
         val url: String
         val requestBuilder: Request.Builder
-        val useResponses = protocol == ApiProtocols.OPENAI && (web || reasoning)
+        val searchMode = WebSearchModes.resolve(protocol, webMode)
+        val useResponses = (protocol == ApiProtocols.OPENAI || protocol == ApiProtocols.OPENAI_COMPAT || protocol == ApiProtocols.OPENROUTER) &&
+            ((web && searchMode == WebSearchModes.RESPONSES) || (protocol == ApiProtocols.OPENAI && reasoning))
+        // Search-specific Chat Completions endpoints may return plain JSON instead of SSE.
+        val unstreamedWebChat = web && !useResponses && searchMode == WebSearchModes.CHAT_OPTIONS
 
         when (protocol) {
             ApiProtocols.ANTHROPIC -> {
@@ -208,7 +213,7 @@ class UniversalApi {
 
             ApiProtocols.OPENAI -> {
                 url = if (useResponses) "$base/responses" else "$base/chat/completions"
-                payload.put("model", model).put("stream", if (useResponses) true else !imageMode)
+                payload.put("model", model).put("stream", if (useResponses) true else !imageMode && !unstreamedWebChat)
                 if (useResponses) {
                     payload.put("max_output_tokens", maxTokens)
                     if (systemPrompt.isNotBlank()) payload.put("instructions", systemPrompt)
@@ -236,21 +241,48 @@ class UniversalApi {
                         msgs.put(JSONObject().put("role", m.role).put("content", openAiCompatibleContent(m.text, prepared)))
                     }
                     payload.put("messages", msgs)
+                    if (web && searchMode == WebSearchModes.CHAT_OPTIONS) {
+                        payload.put("web_search_options", JSONObject().put("search_context_size", "medium"))
+                    }
                 }
                 requestBuilder = Request.Builder().header("Authorization", "Bearer $key")
             }
 
             else -> {
-                url = "$base/chat/completions"
-                payload.put("model", model).put("stream", !imageMode)
-                payload.put("temperature", temperature).put("max_tokens", maxTokens)
-                if (imageMode) payload.put("modalities", JSONArray().put("text").put("image"))
-                val msgs = JSONArray()
-                if (systemPrompt.isNotBlank()) msgs.put(JSONObject().put("role", "system").put("content", systemPrompt))
-                preparedHistory.filter { it.first.text.isNotBlank() || it.second.isNotEmpty() }.forEach { (m, prepared) ->
-                    msgs.put(JSONObject().put("role", m.role).put("content", openAiCompatibleContent(m.text, prepared)))
+                url = if (useResponses) "$base/responses" else "$base/chat/completions"
+                payload.put("model", model).put("stream", if (useResponses) true else !imageMode && !unstreamedWebChat)
+                if (useResponses) {
+                    payload.put("max_output_tokens", maxTokens)
+                    if (systemPrompt.isNotBlank()) payload.put("instructions", systemPrompt)
+                    val inputs = JSONArray()
+                    preparedHistory.filter { it.first.text.isNotBlank() || it.second.isNotEmpty() }.forEach { (m, prepared) ->
+                        val content = JSONArray()
+                        messageTextWithFiles(m.text, prepared).takeIf { it.isNotBlank() }?.let {
+                            content.put(JSONObject().put("type", "input_text").put("text", it))
+                        }
+                        prepared.filter { isImageMime(it.attachment.mimeType) && it.bytes != null }.forEach { item ->
+                            val dataUrl = "data:${item.attachment.mimeType};base64,${Base64.encodeToString(item.bytes, Base64.NO_WRAP)}"
+                            content.put(JSONObject().put("type", "input_image").put("image_url", dataUrl))
+                        }
+                        inputs.put(JSONObject().put("role", m.role).put("content", content))
+                    }
+                    payload.put("input", inputs)
+                    if (web) payload.put("tools", JSONArray().put(JSONObject().put("type", "web_search")))
+                } else {
+                    // Do not send optional sampling settings to specialized web-search endpoints.
+                    if (!unstreamedWebChat) payload.put("temperature", temperature).put("max_tokens", maxTokens)
+                    if (imageMode) payload.put("modalities", JSONArray().put("text").put("image"))
+                    val msgs = JSONArray()
+                    if (systemPrompt.isNotBlank()) msgs.put(JSONObject().put("role", "system").put("content", systemPrompt))
+                    preparedHistory.filter { it.first.text.isNotBlank() || it.second.isNotEmpty() }.forEach { (m, prepared) ->
+                        msgs.put(JSONObject().put("role", m.role).put("content", openAiCompatibleContent(m.text, prepared)))
+                    }
+                    payload.put("messages", msgs)
+                    if (web) when (searchMode) {
+                        WebSearchModes.CHAT_OPTIONS -> payload.put("web_search_options", JSONObject().put("search_context_size", "medium"))
+                        WebSearchModes.OPENROUTER_PLUGIN -> payload.put("plugins", JSONArray().put(JSONObject().put("id", "web").put("max_results", 5)))
+                    }
                 }
-                payload.put("messages", msgs)
                 requestBuilder = Request.Builder()
                 if (key.isNotBlank()) requestBuilder.header("Authorization", "Bearer $key")
                 if (protocol == ApiProtocols.OPENROUTER) requestBuilder.header("HTTP-Referer", "https://github.com/")
@@ -258,8 +290,9 @@ class UniversalApi {
         }
 
         val unstreamedChatImage = imageMode && !imageApi && !useResponses && protocol != ApiProtocols.GEMINI
+        val unstreamedCompatible = unstreamedChatImage || unstreamedWebChat
         val req = requestBuilder.url(url)
-            .header("Accept", if (unstreamedChatImage) "application/json" else "text/event-stream")
+            .header("Accept", if (unstreamedCompatible) "application/json" else "text/event-stream")
             .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
 
@@ -270,18 +303,32 @@ class UniversalApi {
             call.execute().use { response ->
                 if (!response.isSuccessful) {
                     val raw = response.body?.string().orEmpty()
-                    throw ApiHttpException.from(response.code, raw, response.header("Retry-After"))
+                    val apiError = ApiHttpException.from(response.code, raw, response.header("Retry-After"))
+                    if (web && response.code in listOf(400, 404, 422)) {
+                        throw IllegalStateException(
+                            "Роутер отклонил веб-поиск (${WebSearchModes.label(searchMode)}). " +
+                                "Проверь поддержку поиска или выбери другой способ в Настройки → Модель. " + apiError.message
+                        )
+                    }
+                    throw apiError
                 }
-                if (unstreamedChatImage) {
+                if (unstreamedCompatible) {
                     val raw = response.body?.string().orEmpty()
                     val obj = JSONObject(raw)
                     val choice = obj.optJSONArray("choices")?.optJSONObject(0)
                         ?: throw IllegalStateException("Модель не вернула изображение или текст")
                     consumeCompatibleChoice(context, choice, onText, onImage)
+                    appendSearchSources(obj, choice, onText)
+                    if (unstreamedWebChat && protocol == ApiProtocols.OPENAI_COMPAT && !hasSearchEvidence(obj, choice)) {
+                        onText("\n\n> ⚠️ API не прислал подтверждение веб-поиска или ссылки на источники. " +
+                            "Роутер мог проигнорировать параметр `web_search_options`. " +
+                            "Если поиск не работает, выбери другой способ в настройках.")
+                    }
                     return@use
                 }
                 val source = response.body?.source() ?: error("Пустой ответ API")
                 var ended = false
+                val streamedSources = linkedMapOf<String, String>()
                 while (true) {
                     coroutineContext.ensureActive()
                     val line = source.readUtf8Line() ?: break
@@ -331,6 +378,7 @@ class UniversalApi {
                                 val first = obj.optJSONArray("choices")?.optJSONObject(0)
                                 if (first != null) {
                                     consumeCompatibleChoice(context, first, onText, onImage)
+                                    collectSearchSources(obj, first, streamedSources)
                                 }
                                 if (first != null && first.has("finish_reason") && !first.isNull("finish_reason")) ended = true
                                 if (obj.has("error")) throw IllegalStateException(obj.optJSONObject("error")?.optString("message") ?: "Ошибка API")
@@ -338,12 +386,56 @@ class UniversalApi {
                         }
                     }
                 }
+                if (web && streamedSources.isNotEmpty()) {
+                    onText("\n\nИсточники: " + streamedSources.entries.take(8).joinToString(" · ") { (url, title) -> "[$title]($url)" })
+                }
                 if (!ended && protocol != ApiProtocols.GEMINI) {
                     // Some compatible providers close the socket to finish.
                 }
             }
         } finally {
             cancellation.cancel()
+        }
+    }
+
+    private fun hasSearchEvidence(response: JSONObject, choice: JSONObject): Boolean {
+        if ((response.optJSONArray("citations")?.length() ?: 0) > 0) return true
+        if ((choice.optJSONObject("message")?.optJSONArray("annotations")?.length() ?: 0) > 0) return true
+        if ((choice.optJSONObject("message")?.optJSONArray("citations")?.length() ?: 0) > 0) return true
+        return false
+    }
+
+    private fun collectSearchSources(response: JSONObject, choice: JSONObject, result: MutableMap<String, String>) {
+        fun collect(array: JSONArray?) {
+            if (array == null) return
+            for (i in 0 until array.length()) {
+                val entry = array.opt(i)
+                val obj = entry as? JSONObject
+                val citation = obj?.optJSONObject("url_citation") ?: obj
+                val url = when (entry) {
+                    is String -> entry
+                    else -> citation?.optString("url").orEmpty()
+                }
+                if (!url.startsWith("https://") || url.length > 2048 ||
+                    url.any { it.isWhitespace() || it in "[]()" } || result.size >= 8) continue
+                val title = citation?.optString("title")?.take(70)?.takeIf { it.isNotBlank() }
+                    ?: runCatching { java.net.URI(url).host }.getOrNull() ?: "Источник"
+                result.putIfAbsent(url, title.replace(']', ' ').replace('[', ' '))
+            }
+        }
+        collect(response.optJSONArray("citations"))
+        collect(choice.optJSONObject("message")?.optJSONArray("citations"))
+        collect(choice.optJSONObject("message")?.optJSONArray("annotations"))
+        collect(choice.optJSONObject("delta")?.optJSONArray("annotations"))
+    }
+
+    private suspend fun appendSearchSources(
+        response: JSONObject, choice: JSONObject, onText: suspend (String) -> Unit
+    ) {
+        val sources = linkedMapOf<String, String>()
+        collectSearchSources(response, choice, sources)
+        if (sources.isNotEmpty()) {
+            onText("\n\nИсточники: " + sources.entries.joinToString(" · ") { (url, title) -> "[$title]($url)" })
         }
     }
 

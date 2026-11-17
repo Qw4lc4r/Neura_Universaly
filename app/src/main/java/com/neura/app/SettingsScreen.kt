@@ -27,7 +27,7 @@ import androidx.compose.ui.unit.sp
 fun SettingsScreen(
     provider: String, protocol: String, apiKey: String, endpoint: String, model: String,
     imageMode: Boolean, web: Boolean, reasoning: Boolean,
-    systemPrompt: String, maxTokens: String, temperature: String, dark: Boolean,
+    webMode: String, systemPrompt: String, maxTokens: String, temperature: String, dark: Boolean,
     onBack: () -> Unit,
     onProvider: (String) -> Unit,
     onProtocol: (String) -> Unit,
@@ -37,6 +37,7 @@ fun SettingsScreen(
     onModelLibrary: () -> Unit,
     onImageMode: (Boolean) -> Unit,
     onWeb: (Boolean) -> Unit,
+    onWebMode: (String) -> Unit,
     onReasoning: (Boolean) -> Unit,
     onPrompt: (String) -> Unit,
     onTokens: (String) -> Unit,
@@ -48,6 +49,7 @@ fun SettingsScreen(
 ) {
     var providerMenu by remember { mutableStateOf(false) }
     var protocolMenu by remember { mutableStateOf(false) }
+    var webModeMenu by remember { mutableStateOf(false) }
     var showKey by remember { mutableStateOf(false) }
     var section by remember { mutableStateOf("Подключение") }
 
@@ -149,7 +151,32 @@ fun SettingsScreen(
                         }
                         HorizontalDivider()
                         SettingsSwitch("Режим изображения", "Использовать Image API, только для совместимых моделей", imageMode, onImageMode)
-                        SettingsSwitch("Поиск в интернете", "Когда провайдер и модель поддерживают инструмент", web, onWeb)
+                        SettingsSwitch("Поиск в интернете", "Запрашивать реальный поиск через API выбранного роутера", web, onWeb)
+                        if (provider == "custom" && protocol in setOf(ApiProtocols.OPENAI_COMPAT, ApiProtocols.OPENROUTER, ApiProtocols.OPENAI)) {
+                            Text("СПОСОБ ВЕБ-ПОИСКА", style = MaterialTheme.typography.labelSmall, letterSpacing = 1.sp)
+                            Box {
+                                OutlinedButton(onClick = { webModeMenu = true }, modifier = Modifier.fillMaxWidth()) {
+                                    Text(WebSearchModes.label(webMode), modifier = Modifier.weight(1f))
+                                    Icon(Icons.Default.KeyboardArrowDown, "Выбрать способ поиска")
+                                }
+                                DropdownMenu(webModeMenu, onDismissRequest = { webModeMenu = false }) {
+                                    WebSearchModes.options(protocol).forEach { option ->
+                                        DropdownMenuItem(text = { Text(WebSearchModes.label(option)) }, onClick = {
+                                            onWebMode(option); webModeMenu = false
+                                        })
+                                    }
+                                }
+                            }
+                            Text(
+                                "OpenAI-совместимость не гарантирует интернет-поиск. " +
+                                    "Авто: для OpenRouter — web plugin, для OpenAI — Responses, " +
+                                    "для остальных — web_search_options. " +
+                                    "Если сервер не поддерживает выбранный способ, попробуй другой или обратись к его документации. " +
+                                    "Поиск может тарифицироваться отдельно.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                         SettingsSwitch("Размышления", "Когда модель поддерживает reasoning", reasoning, onReasoning)
                     }
                     SettingsPanel {

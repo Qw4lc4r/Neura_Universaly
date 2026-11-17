@@ -60,6 +60,7 @@ fun NeuraApp() {
     var videoSeconds by remember { mutableStateOf(store.string("video_seconds", "0")) }
     var videoRatio by remember { mutableStateOf(store.string("video_ratio", "auto")) }
     var web by remember { mutableStateOf(store.bool("web_$provider", false)) }
+    var webMode by remember { mutableStateOf(store.string("web_mode_$provider", WebSearchModes.AUTO)) }
     var reasoning by remember { mutableStateOf(store.bool("reasoning_$provider", false)) }
     var systemPrompt by remember { mutableStateOf(store.string("system", "Ты внимательный AI-ассистент. Отвечай на языке пользователя.") ) }
     var maxTokens by remember { mutableStateOf(store.string("tokens", "4096")) }
@@ -119,6 +120,7 @@ fun NeuraApp() {
         apiKey = store.loadKey(next)
         model = store.string("model_$next", Providers.defaultModel(next))
         web = store.bool("web_$next")
+        webMode = store.string("web_mode_$next", WebSearchModes.AUTO)
         reasoning = store.bool("reasoning_$next")
         imageMode = store.bool("image_mode_$next")
         imageApi = store.bool("image_api_$next")
@@ -190,7 +192,7 @@ fun NeuraApp() {
                 } else {
                 api.stream(
                     context.applicationContext, protocol, endpoint, apiKey.trim(), model.trim(),
-                    systemPrompt, web && ApiCapabilities.web(protocol, model),
+                    systemPrompt, web && mediaRoute == MediaRoute.CHAT && ApiCapabilities.web(protocol, model), webMode,
                     reasoning && ApiCapabilities.reasoning(protocol, model),
                     maxTokens.toIntOrNull()?.coerceIn(1, 32000) ?: 4096,
                     temperature.toDoubleOrNull()?.coerceIn(0.0, 1.0) ?: 1.0,
@@ -248,7 +250,7 @@ fun NeuraApp() {
             when (activePage) {
                 "settings" -> SettingsScreen(
                     provider, protocol, apiKey, endpoint, model, imageMode, web, reasoning,
-                    systemPrompt, maxTokens, temperature, dark,
+                    webMode, systemPrompt, maxTokens, temperature, dark,
                     onBack = { page = "chat" },
                     onProvider = ::switchProvider,
                     onProtocol = { chosen ->
@@ -269,6 +271,7 @@ fun NeuraApp() {
                     onImageMode = { imageMode = it; imageApi = it; mediaRoute = if (it) MediaRoute.IMAGE else MediaRoute.CHAT;
                         store.set("route_$provider", mediaRoute); store.set("image_mode_$provider", it); store.set("image_api_$provider", it) },
                     onWeb = { web = it; store.set("web_$provider", it) },
+                    onWebMode = { webMode = it; store.set("web_mode_$provider", it) },
                     onReasoning = { reasoning = it; store.set("reasoning_$provider", it) },
                     onPrompt = { systemPrompt = it; store.set("system", it) },
                     onTokens = { maxTokens = it; store.set("tokens", it) },
