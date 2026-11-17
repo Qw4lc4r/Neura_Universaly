@@ -5,9 +5,11 @@ import android.content.ActivityNotFoundException
 import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
+import android.os.Build
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
+import androidx.core.content.FileProvider
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
@@ -89,13 +91,20 @@ private fun guessMimeFromName(name: String): String {
 
 fun openAttachment(context: Context, attachment: Attachment) {
     try {
+        val source = Uri.parse(attachment.uri)
+        val uri = if (source.scheme == "file") {
+            val path = source.path ?: throw IllegalArgumentException("Нет пути к файлу")
+            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", java.io.File(path))
+        } else source
         val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(Uri.parse(attachment.uri), attachment.mimeType)
+            setDataAndType(uri, attachment.mimeType)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         context.startActivity(Intent.createChooser(intent, attachment.name))
     } catch (_: ActivityNotFoundException) {
         Toast.makeText(context, "Нет приложения для открытия файла", Toast.LENGTH_SHORT).show()
+    } catch (e: Exception) {
+        Toast.makeText(context, e.message ?: "Не удалось открыть файл", Toast.LENGTH_LONG).show()
     }
 }
 
@@ -152,8 +161,38 @@ fun PendingAttachmentsRow(attachments: List<Attachment>, onRemove: (Attachment) 
     }
 }
 
+fun saveGeneratedImage(context: Context, attachment: Attachment) {
+    require(isImageMime(attachment.mimeType)) { "Неверный тип изображения" }
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+        Toast.makeText(context, "Сохранение в галерею поддерживается на Android 10+", Toast.LENGTH_LONG).show()
+        return
+    }
+    val resolver = context.contentResolver
+    val values = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, attachment.name)
+        put(MediaStore.Images.Media.MIME_TYPE, attachment.mimeType)
+        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Neura")
+        put(MediaStore.Images.Media.IS_PENDING, 1)
+    }
+    val destination = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        ?: throw IllegalStateException("Не удалось создать файл изображения")
+    try {
+        resolver.openInputStream(Uri.parse(attachment.uri))?.use { input ->
+            resolver.openOutputStream(destination)?.use { output -> input.copyTo(output) }
+                ?: throw IllegalStateException("Не удалось открыть выходной файл")
+        } ?: throw IllegalStateException("Изображение отсутствует")
+        values.clear()
+        values.put(MediaStore.Images.Media.IS_PENDING, 0)
+        resolver.update(destination, values, null, null)
+        Toast.makeText(context, "Сохранено в Изображения/Neura", Toast.LENGTH_SHORT).show()
+    } catch (e: Exception) {
+        resolver.delete(destination, null, null)
+        throw e
+    }
+}
+
 @Composable
-fun MessageAttachments(attachments: List<Attachment>) {
+fun MessageAttachments(attachments: List<Attachment>, allowDownload: Boolean = false) {
     if (attachments.isEmpty()) return
     val context = LocalContext.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 14.dp)) {
@@ -173,6 +212,13 @@ fun MessageAttachments(attachments: List<Attachment>) {
                             Column(Modifier.weight(1f)) {
                                 Text(attachment.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 if (attachment.size > 0) Text(humanFileSize(attachment.size), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            if (allowDownload && attachment.uri.startsWith("file:")) {
+                                IconButton(onClick = {
+                                    runCatching { saveGeneratedImage(context, attachment) }.onFailure {
+                                        Toast.makeText(context, it.message ?: "Не удалось сохранить", Toast.LENGTH_LONG).show()
+                                    }
+                                }) { Icon(Icons.Default.Download, contentDescription = "Сохранить изображение") }
                             }
                             IconButton(onClick = { openAttachment(context, attachment) }) { Icon(Icons.Default.OpenInNew, null) }
                         }

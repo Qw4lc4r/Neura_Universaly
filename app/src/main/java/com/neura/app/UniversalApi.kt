@@ -2,6 +2,9 @@ package com.neura.app
 
 import android.content.Context
 import android.net.Uri
+import android.util.Base64
+import java.io.File
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.ensureActive
@@ -15,7 +18,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
-import java.util.Base64
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.coroutineContext
 
@@ -106,7 +108,10 @@ class UniversalApi {
         maxTokens: Int,
         temperature: Double,
         history: List<Message>,
-        onText: suspend (String) -> Unit
+        imageMode: Boolean,
+        imageApi: Boolean,
+        onText: suspend (String) -> Unit,
+        onImage: suspend (Attachment) -> Unit
     ) = withContext(Dispatchers.IO) {
         val base = endpoint.trim().trimEnd('/')
         require(base.startsWith("https://") && !base.contains('#') && !base.contains('?')) {
@@ -119,6 +124,10 @@ class UniversalApi {
         require(parsed.rawUserInfo == null) { "В URL нельзя указывать логин или пароль" }
         require(parsed.host != "example.com") { "Укажи настоящий адрес своего API" }
 
+        if (imageMode && (imageApi || provider == "openai" || provider == "gemini")) {
+            generateImages(context, provider, base, key, model, history, onText, onImage)
+            return@withContext
+        }
         val preparedHistory = history.map { it to prepareAttachments(context, it.attachments) }
         val payload = JSONObject()
         val url: String
@@ -150,7 +159,7 @@ class UniversalApi {
                                 "source", JSONObject()
                                     .put("type", "base64")
                                     .put("media_type", item.attachment.mimeType)
-                                    .put("data", Base64.getEncoder().encodeToString(item.bytes))
+                                    .put("data", Base64.encodeToString(item.bytes, Base64.NO_WRAP))
                             )
                         )
                     }
@@ -174,7 +183,7 @@ class UniversalApi {
                         parts.put(
                             JSONObject().put(
                                 "inlineData",
-                                JSONObject().put("mimeType", item.attachment.mimeType).put("data", Base64.getEncoder().encodeToString(item.bytes))
+                                JSONObject().put("mimeType", item.attachment.mimeType).put("data", Base64.encodeToString(item.bytes, Base64.NO_WRAP))
                             )
                         )
                     }
@@ -207,7 +216,7 @@ class UniversalApi {
                             content.put(JSONObject().put("type", "input_text").put("text", it))
                         }
                         prepared.filter { isImageMime(it.attachment.mimeType) && it.bytes != null }.forEach { item ->
-                            val dataUrl = "data:${item.attachment.mimeType};base64,${Base64.getEncoder().encodeToString(item.bytes)}"
+                            val dataUrl = "data:${item.attachment.mimeType};base64,${Base64.encodeToString(item.bytes, Base64.NO_WRAP)}"
                             content.put(JSONObject().put("type", "input_image").put("image_url", dataUrl))
                         }
                         inputs.put(JSONObject().put("role", m.role).put("content", content))
@@ -231,6 +240,7 @@ class UniversalApi {
                 url = "$base/chat/completions"
                 payload.put("model", model).put("stream", true)
                 payload.put("temperature", temperature).put("max_tokens", maxTokens)
+                if (imageMode) payload.put("modalities", JSONArray().put("text").put("image"))
                 val msgs = JSONArray()
                 if (systemPrompt.isNotBlank()) msgs.put(JSONObject().put("role", "system").put("content", systemPrompt))
                 preparedHistory.filter { it.first.text.isNotBlank() || it.second.isNotEmpty() }.forEach { (m, prepared) ->
@@ -250,14 +260,12 @@ class UniversalApi {
 
         val noRedirectClient = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
         val call = noRedirectClient.newCall(req)
-        val cancellation = launch { try { awaitCancellation() } finally { call.cancel() } }
+        val cancellation = kotlinx.coroutines.CoroutineScope(coroutineContext).launch { try { awaitCancellation() } finally { call.cancel() } }
         try {
             call.execute().use { response ->
                 if (!response.isSuccessful) {
                     val raw = response.body?.string().orEmpty()
-                    val obj = runCatching { JSONObject(raw) }.getOrNull()
-                    val msg = obj?.optJSONObject("error")?.optString("message")
-                    throw IllegalStateException("${Providers.name(provider)} HTTP ${response.code}: ${msg?.ifBlank { null } ?: raw.take(350)}")
+                    throw ApiHttpException.from(response.code, raw, response.header("Retry-After"))
                 }
                 val source = response.body?.source() ?: error("Пустой ответ API")
                 var ended = false
@@ -288,6 +296,9 @@ class UniversalApi {
                                 for (i in 0 until parts.length()) {
                                     val part = parts.optJSONObject(i)
                                     if (part?.optBoolean("thought") != true) part?.optString("text")?.takeIf { it.isNotEmpty() }?.let { onText(it) }
+                                    part?.optJSONObject("inlineData")?.let { inline ->
+                                        saveEncodedImage(context, inline.optString("data"), inline.optString("mimeType", "image/png"))?.let { onImage(it) }
+                                    }
                                 }
                             }
                             if (obj.has("error")) throw IllegalStateException(obj.optJSONObject("error")?.optString("message") ?: "Ошибка Gemini")
@@ -308,6 +319,16 @@ class UniversalApi {
                                 val delta = first?.optJSONObject("delta")
                                 val text = delta?.optString("content")
                                 if (!text.isNullOrEmpty()) onText(text)
+                                val images = delta?.optJSONArray("images")
+                                if (images != null) for (i in 0 until images.length()) {
+                                    val image = images.optJSONObject(i) ?: continue
+                                    val imageUrl = image.optJSONObject("image_url")?.optString("url")
+                                        ?: image.optString("image_url")
+                                    if (imageUrl.startsWith("data:image/")) {
+                                        val mime = imageUrl.substringAfter("data:").substringBefore(';')
+                                        saveEncodedImage(context, imageUrl.substringAfter("base64,"), mime)?.let { onImage(it) }
+                                    }
+                                }
                                 if (first != null && first.has("finish_reason") && !first.isNull("finish_reason")) ended = true
                                 if (obj.has("error")) throw IllegalStateException(obj.optJSONObject("error")?.optString("message") ?: "Ошибка API")
                             }
@@ -323,13 +344,127 @@ class UniversalApi {
         }
     }
 
+    private suspend fun generateImages(
+        context: Context, provider: String, base: String, key: String, model: String,
+        history: List<Message>, onText: suspend (String) -> Unit,
+        onImage: suspend (Attachment) -> Unit
+    ) {
+        val last = history.lastOrNull { it.role == "user" }
+        val prompt = last?.text?.trim().orEmpty()
+        require(prompt.isNotBlank()) { "Для генерации изображения нужен текстовый запрос" }
+        val payload = JSONObject().put("model", model).put("prompt", prompt).put("n", 1)
+        val url: String
+        val builder = Request.Builder().header("Accept", "application/json")
+        when (provider) {
+            "openrouter", "custom" -> {
+                url = "$base/images"
+                if (key.isNotBlank()) builder.header("Authorization", "Bearer $key")
+                // Reference images need a compatible image endpoint; unsupported models may reject them.
+                val source = last?.attachments?.firstOrNull { isImageMime(it.mimeType) }
+                if (source != null) {
+                    val bytes = readBytes(context, Uri.parse(source.uri), 8 * 1024 * 1024)
+                    if (bytes != null) {
+                        val data = "data:${source.mimeType};base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
+                        payload.put("input_references", JSONArray().put(JSONObject().put("type", "image_url")
+                            .put("image_url", JSONObject().put("url", data))))
+                    }
+                }
+            }
+            "openai" -> {
+                url = "$base/images/generations"
+                builder.header("Authorization", "Bearer $key")
+                // GPT Image endpoints return base64 by default; legacy response_format is not required.
+            }
+            "gemini" -> {
+                val safeModel = java.net.URLEncoder.encode(model, "UTF-8").replace("+", "%20")
+                url = "$base/models/$safeModel:generateContent"
+                builder.header("x-goog-api-key", key)
+                val parts = JSONArray().put(JSONObject().put("text", prompt))
+                last?.attachments?.filter { isImageMime(it.mimeType) }?.forEach { a ->
+                    val bytes = readBytes(context, Uri.parse(a.uri), 8 * 1024 * 1024)
+                    if (bytes != null) parts.put(JSONObject().put("inlineData", JSONObject()
+                        .put("mimeType", a.mimeType).put("data", Base64.encodeToString(bytes, Base64.NO_WRAP))))
+                }
+                val geminiPayload = JSONObject().put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
+                    .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("TEXT").put("IMAGE")))
+                return postImageRequest(context, builder, url, geminiPayload, true, onText, onImage)
+            }
+            else -> error("Генерация изображений не поддерживается этим API. Выбери OpenRouter, OpenAI или Gemini.")
+        }
+        postImageRequest(context, builder, url, payload, false, onText, onImage)
+    }
+
+    private suspend fun postImageRequest(
+        context: Context, builder: Request.Builder, url: String, payload: JSONObject,
+        gemini: Boolean, onText: suspend (String) -> Unit, onImage: suspend (Attachment) -> Unit
+    ) {
+        val request = builder.url(url)
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())).build()
+        val call = client.newBuilder().followRedirects(false).followSslRedirects(false).build().newCall(request)
+        val cancellation = kotlinx.coroutines.CoroutineScope(coroutineContext).launch { try { awaitCancellation() } finally { call.cancel() } }
+        try {
+            call.execute().use { response ->
+                val raw = response.body?.string().orEmpty()
+                if (!response.isSuccessful) throw ApiHttpException.from(response.code, raw, response.header("Retry-After"))
+                val json = JSONObject(raw)
+                var count = 0
+                if (gemini) {
+                    val parts = json.optJSONArray("candidates")?.optJSONObject(0)
+                        ?.optJSONObject("content")?.optJSONArray("parts") ?: JSONArray()
+                    for (i in 0 until parts.length()) {
+                        coroutineContext.ensureActive()
+                        val part = parts.optJSONObject(i) ?: continue
+                        part.optString("text").takeIf { it.isNotBlank() }?.let { onText(it) }
+                        val inline = part.optJSONObject("inlineData") ?: continue
+                        saveEncodedImage(context, inline.optString("data"), inline.optString("mimeType", "image/png"))?.let {
+                            onImage(it); count++
+                        }
+                    }
+                } else {
+                    val data = json.optJSONArray("data") ?: JSONArray()
+                    for (i in 0 until data.length()) {
+                        coroutineContext.ensureActive()
+                        val item = data.optJSONObject(i) ?: continue
+                        saveEncodedImage(context, item.optString("b64_json"), item.optString("media_type", "image/png"))?.let {
+                            onImage(it); count++
+                        }
+                        // Some compatible image endpoints only return a hosted URL.
+                        val urlValue = item.optString("url")
+                        if (urlValue.startsWith("https://")) { onText("\n![Изображение]($urlValue)"); count++ }
+                    }
+                }
+                if (count == 0) throw IllegalStateException("API ответил без изображения. Выбери модель с поддержкой генерации изображений.")
+            }
+        } finally { cancellation.cancel() }
+    }
+
+    private fun saveEncodedImage(context: Context, encoded: String, mimeHint: String): Attachment? {
+        if (encoded.isBlank()) return null
+        val normalized = encoded.substringAfter("base64,", encoded)
+        // Bound decoded memory consumption and avoid writing malformed data.
+        if (normalized.length > 45_000_000) throw IllegalArgumentException("Изображение слишком большое")
+        val bytes = Base64.decode(normalized, Base64.DEFAULT)
+        require(bytes.size in 1..30_000_000) { "Получено слишком большое изображение" }
+        val mime = when {
+            bytes.size > 3 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() -> "image/jpeg"
+            bytes.size > 12 && bytes.copyOfRange(0, 4).contentEquals("RIFF".toByteArray()) -> "image/webp"
+            mimeHint == "image/svg+xml" -> "image/svg+xml"
+            else -> "image/png"
+        }
+        val ext = when (mime) { "image/jpeg" -> "jpg"; "image/webp" -> "webp"; "image/svg+xml" -> "svg"; else -> "png" }
+        val name = "neura-${java.util.UUID.randomUUID()}.$ext"
+        val dir = java.io.File(context.filesDir, "generated_images").apply { mkdirs() }
+        val file = java.io.File(dir, name).apply { writeBytes(bytes) }
+        return Attachment(name = name, uri = Uri.fromFile(file).toString(), mimeType = mime, size = bytes.size.toLong())
+    }
+
     private fun openAiCompatibleContent(text: String, prepared: List<PreparedAttachment>): Any {
         val items = JSONArray()
         messageTextWithFiles(text, prepared).takeIf { it.isNotBlank() }?.let {
             items.put(JSONObject().put("type", "text").put("text", it))
         }
         prepared.filter { isImageMime(it.attachment.mimeType) && it.bytes != null }.forEach { item ->
-            val dataUrl = "data:${item.attachment.mimeType};base64,${Base64.getEncoder().encodeToString(item.bytes)}"
+            val dataUrl = "data:${item.attachment.mimeType};base64,${Base64.encodeToString(item.bytes, Base64.NO_WRAP)}"
             items.put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", dataUrl)))
         }
         return if (items.length() == 1 && items.optJSONObject(0)?.optString("type") == "text") {
@@ -374,7 +509,7 @@ class UniversalApi {
                 val read = input.read(buffer)
                 if (read <= 0) break
                 total += read
-                if (total > limit) break
+                if (total > limit) throw IllegalArgumentException("Изображение слишком большое (максимум ${limit / (1024 * 1024)} MB)")
                 out.write(buffer, 0, read)
             }
             return out.toByteArray()
