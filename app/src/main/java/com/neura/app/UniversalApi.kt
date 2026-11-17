@@ -13,6 +13,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.coroutineContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 object Providers {
     val ids = listOf("openai", "anthropic", "gemini", "openrouter", "deepseek", "groq", "mistral", "together", "custom")
@@ -49,7 +50,7 @@ class UniversalApi {
             "Используй HTTPS endpoint без параметров запроса"
         }
         // Prevent accidental key disclosure through username:password URLs or redirects.
-        val parsed = okhttp3.HttpUrl.parse(base) ?: error("Неверный URL API")
+        val parsed = okhttp3.toHttpUrlOrNull(base) ?: error("Неверный URL API")
         require(parsed.username.isBlank() && parsed.password.isBlank()) { "В URL нельзя указывать логин или пароль" }
         require(parsed.host != "example.com") { "Укажи настоящий адрес своего API" }
         val payload = JSONObject()
