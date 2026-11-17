@@ -50,7 +50,7 @@ class UniversalApi {
             "Используй HTTPS endpoint без параметров запроса"
         }
         // Prevent accidental key disclosure through username:password URLs or redirects.
-        val parsed = okhttp3.toHttpUrlOrNull(base) ?: error("Неверный URL API")
+        val parsed = okhttp3.base.toHttpUrlOrNull() ?: error("Неверный URL API")
         require(parsed.username.isBlank() && parsed.password.isBlank()) { "В URL нельзя указывать логин или пароль" }
         require(parsed.host != "example.com") { "Укажи настоящий адрес своего API" }
         val payload = JSONObject()
