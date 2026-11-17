@@ -16,7 +16,7 @@ A native Android chat client (Kotlin + Jetpack Compose + Material 3) built aroun
 | Together AI | OpenAI-compatible | `https://api.together.xyz/v1` |
 | Custom API | OpenAI-compatible | Your HTTPS base URL |
 
-Set any model ID that your selected provider actually exposes to your key. **Not every model is compatible with Chat Completions**; for example, some models require the provider's Responses API and may reject this client's requests. Models can impose their own token/temperature/tool restrictions. The default IDs are examples, not live listings or guarantees.
+Set any model ID that your selected provider actually exposes to your key. **Not every model is compatible with Chat Completions**; for example, some models require the provider's Responses API and may reject this client's requests. Models can impose their own token/temperature/tool restrictions. The default IDs and model suggestions are examples, not a dynamic model listing or guarantees.
 
 ## Included
 
@@ -25,7 +25,11 @@ Set any model ID that your selected provider actually exposes to your key. **Not
 - Markdown headings, lists, links, code blocks with copy and basic syntax highlighting
 - Provider selection, independent encrypted API keys per provider, editable model ID and HTTPS base URL
 - System instructions, output token/temperature settings, light/dark modes
-- Anthropic-only optional web search using `web_search_20250305` (subject to API support/billing)
+- Web search toggle: Anthropic native `web_search_20250305`; Gemini `google_search`; OpenAI Responses `web_search` (model/key support and billing required)
+- Reasoning toggle: Anthropic thinking config, Gemini thinking config, OpenAI Responses reasoning effort on compatible models
+- Provider/model suggestions and editable custom model ID; quick search/reasoning controls above the composer
+- Keyboard-aware composer using edge-to-edge insets, `adjustResize` and Compose `imePadding()`
+- Minimalist graphite and sage UI with quieter message presentation
 - Local history storage with atomic file writes; Android Keystore AES-GCM for key encryption
 - Github Actions debug-APK build without the obsolete SDK `tools` package
 
@@ -36,9 +40,12 @@ Set any model ID that your selected provider actually exposes to your key. **Not
 - The app does not provide free inference or bypass payment. Each provider sets prices, quotas, eligibility and availability.
 - No OAuth login with ChatGPT/Claude subscriptions; this uses developer API keys, not chat subscriptions.
 - Images/audio/file attachments, local HTTP models, function calling, citations, multimodal/tool rendering, live model discovery and full LaTeX are not implemented.
-- No generic web-search toggle for every provider: only Anthropic's server-side tool is wired.
+- Search/reasoning controls are intentionally disabled for generic OpenAI-compatible providers: APIs are not consistent. Providers may also reject enabled tools even where shown as available.
+- Neither web search nor reasoning offers a universal "force" guarantee. When reasoning is off, some models can still reason by default.
+- OpenAI uses Responses API only when search or reasoning is requested; other requests use Chat Completions.
+- Web search source citations are currently not rendered as separate source cards; do not rely on this client for citation-rich research.
 - For some OpenAI-compatible providers, default `max_tokens` or `temperature` fields may be unsupported. Adjust or extend adapter as needed.
-- This source tree has not been compiled in this environment. Check the GitHub Actions log for any compilation issues.
+- This source tree has not been compiled in this environment (Android SDK/Gradle not installed here). Check the GitHub Actions log for any compilation issues, then test keyboard in portrait and landscape on your device.
 
 ## Build with GitHub Actions (from Android/Termux)
 

@@ -5,6 +5,9 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
+import androidx.core.view.WindowCompat
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -40,16 +43,17 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private val backgroundDark = Color(0xFF0D111B)
-private val surfaceDark = Color(0xFF171D2B)
-private val accent = Color(0xFFBFA9FF)
-private val mint = Color(0xFF87DEC4)
+private val backgroundDark = Color(0xFF111314)
+private val surfaceDark = Color(0xFF191C1D)
+private val accent = Color(0xFFC9D7CE)
+private val mint = Color(0xFF8DADA0)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = android.graphics.Color.rgb(13, 17, 27)
-        window.navigationBarColor = android.graphics.Color.rgb(13, 17, 27)
+        window.statusBarColor = android.graphics.Color.rgb(17, 19, 20)
+        window.navigationBarColor = android.graphics.Color.rgb(17, 19, 20)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         setContent { NeuraApp() }
     }
 }
@@ -69,15 +73,19 @@ fun NeuraApp() {
     var providerMenu by remember { mutableStateOf(false) }
     var showKey by remember { mutableStateOf(false) }
     var model by remember { mutableStateOf(store.string("model_$provider", Providers.defaultModel(provider))) }
+    var systemPrompt by remember { mutableStateOf(store.string("system", "Ты полезный, внимательный AI-ассистент. Отвечай на языке пользователя.")) }
+    var web by remember { mutableStateOf(store.bool("web_$provider")) }
+    var reasoning by remember { mutableStateOf(store.bool("reasoning_$provider")) }
+    var modelPicker by remember { mutableStateOf(false) }
     fun chooseProvider(value: String) {
         provider = value
         store.set("provider", value)
         keyInput = store.loadKey(value)
         endpoint = store.string("endpoint_$value", Providers.endpoint(value))
         model = store.string("model_$value", Providers.defaultModel(value))
+        web = store.bool("web_$value")
+        reasoning = store.bool("reasoning_$value")
     }
-    var systemPrompt by remember { mutableStateOf(store.string("system", "Ты полезный, внимательный AI-ассистент. Отвечай на языке пользователя.")) }
-    var web by remember { mutableStateOf(store.bool("web")) }
     var maxTokens by remember { mutableStateOf(store.string("tokens", "4096")) }
     var temperature by remember { mutableStateOf(store.string("temperature", "1")) }
     var isDark by remember { mutableStateOf(store.bool("dark", true)) }
@@ -94,11 +102,11 @@ fun NeuraApp() {
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     val scheme = if (isDark) darkColorScheme(
-        primary = accent, onPrimary = Color(0xFF211739), background = backgroundDark, onBackground = Color(0xFFE9EDF6),
-        surface = surfaceDark, onSurface = Color(0xFFE9EDF6), surfaceVariant = Color(0xFF252D3C),
-        primaryContainer = Color(0xFF34304F), onPrimaryContainer = Color(0xFFF1ECFF),
-        outlineVariant = Color(0xFF323B4A), secondary = mint
-    ) else lightColorScheme(primary = Color(0xFF6E54B6), secondary = Color(0xFF227B66), background = Color(0xFFF8F9FC), surface = Color.White)
+        primary = accent, onPrimary = Color(0xFF19231E), background = backgroundDark, onBackground = Color(0xFFE3E8E4),
+        surface = surfaceDark, onSurface = Color(0xFFE3E8E4), surfaceVariant = Color(0xFF272B2B),
+        primaryContainer = Color(0xFF303B35), onPrimaryContainer = Color(0xFFE5F2E8),
+        outlineVariant = Color(0xFF303635), secondary = mint
+    ) else lightColorScheme(primary = Color(0xFF385B4B), secondary = Color(0xFF527464), background = Color(0xFFF7F8F5), surface = Color.White)
 
     fun persist(next: List<Conversation>) { chats = next.sortedByDescending { it.updatedAt }; store.saveChats(chats) }
     fun changeChat(chat: Conversation) { if (busy) activeJob?.cancel(); currentId = chat.id; streaming = ""; busy = false; error = ""; screen = "chat" }
@@ -129,7 +137,7 @@ fun NeuraApp() {
         activeJob = scope.launch {
             val key = keyInput.trim(); val selectedModel = model.trim()
             try {
-                api.stream(provider, endpoint, key, selectedModel, systemPrompt, web,
+                api.stream(provider, endpoint, key, selectedModel, systemPrompt, web && ApiCapabilities.web(provider, selectedModel), reasoning && ApiCapabilities.reasoning(provider, selectedModel),
                     maxTokens.toIntOrNull()?.coerceIn(1, 32000) ?: 4096,
                     temperature.toDoubleOrNull()?.coerceIn(0.0, 1.0) ?: 1.0,
                     history
@@ -166,7 +174,7 @@ fun NeuraApp() {
     BackHandler(screen != "chat") { screen = "chat" }
 
     MaterialTheme(colorScheme = scheme) {
-        Surface(Modifier.fillMaxSize().systemBarsPadding(), color = MaterialTheme.colorScheme.background) {
+        Surface(Modifier.fillMaxSize().systemBarsPadding().imePadding(), color = MaterialTheme.colorScheme.background) {
             when (screen) {
                 "list" -> Column {
                     Header("История чатов", onBack = { screen = "chat" }, action = {
@@ -231,10 +239,20 @@ fun NeuraApp() {
                             runCatching { store.saveKey(keyInput.trim(), provider); keyInput = store.loadKey(provider) }
                                 .onFailure { error = "Не удалось защитить ключ: ${it.message}" }
                         }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Lock, null); Spacer(Modifier.width(8.dp)); Text("Сохранить ключ защищённо") }
-                        OutlinedTextField(model, { model = it; store.set("model_$provider", it) }, modifier = Modifier.fillMaxWidth(), singleLine = true,
-                            label = { Text("ID модели") }, supportingText = { Text("Модель, доступная выбранному провайдеру") }, shape = RoundedCornerShape(15.dp))
-                        SettingsHeading("Возможности", "Настрой поведение ассистента")
-                        if (provider == "anthropic") SettingSwitch("Поиск в интернете", "Нативный поиск Anthropic (платный, если доступен)", web) { web = it; store.set("web", it) }
+                        Box {
+                            OutlinedTextField(model, { model = it; store.set("model_$provider", it) }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                                label = { Text("ID модели") }, supportingText = { Text("Введи ID вручную или выбери пример") }, shape = RoundedCornerShape(12.dp),
+                                trailingIcon = { IconButton(onClick = { modelPicker = true }) { Icon(Icons.Default.ExpandMore, "Выбрать модель") } })
+                            DropdownMenu(expanded = modelPicker, onDismissRequest = { modelPicker = false }) {
+                                Providers.suggestions(provider).forEach { suggested ->
+                                    DropdownMenuItem(text = { Text(suggested) }, onClick = { model = suggested; store.set("model_$provider", model); modelPicker = false })
+                                }
+                            }
+                        }
+                        SettingsHeading("Инструменты модели", "Доступность зависит от выбранного API и модели")
+                        SettingSwitch("Поиск в интернете", if (ApiCapabilities.web(provider, model)) "Поиск силами провайдера · может тарифицироваться отдельно" else "Для этого API/модели поиск не подключён", web && ApiCapabilities.web(provider, model), enabled = ApiCapabilities.web(provider, model)) { web = it; store.set("web_$provider", it) }
+                        SettingSwitch("Размышления", if (ApiCapabilities.reasoning(provider, model)) "Включает управляемые настройки reasoning API" else "Для этой модели нет безопасного универсального переключателя", reasoning && ApiCapabilities.reasoning(provider, model), enabled = ApiCapabilities.reasoning(provider, model)) { reasoning = it; store.set("reasoning_$provider", it) }
+                        Text("Переключатели действительно изменяют API-запрос, но модель и ключ должны поддерживать выбранную функцию.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         OutlinedTextField(systemPrompt, { systemPrompt = it; store.set("system", it) }, modifier = Modifier.fillMaxWidth(), minLines = 3, maxLines = 8,
                             label = { Text("Системный промпт") }, shape = RoundedCornerShape(15.dp))
                         OutlinedTextField(maxTokens, { maxTokens = it; store.set("tokens", it) }, modifier = Modifier.fillMaxWidth(), singleLine = true,
@@ -253,12 +271,11 @@ fun NeuraApp() {
                         IconButton(onClick = { screen = "list" }) { Icon(Icons.Default.Menu, "История") }
                         Column(Modifier.weight(1f).clickable { screen = "settings" }) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("Neura Universal", fontWeight = FontWeight.ExtraBold, fontSize = 21.sp)
-                                Spacer(Modifier.width(7.dp)); Text("✦", color = MaterialTheme.colorScheme.secondary)
+                                Text("neura", fontWeight = FontWeight.Medium, fontSize = 20.sp, letterSpacing = (-0.7).sp)
                             }
                             Text("${Providers.name(provider)} · $model", maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
                         }
-                        if (web && provider == "anthropic") Icon(Icons.Default.Public, "Веб-поиск включён", tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(19.dp))
+
                         IconButton(onClick = { newChat() }) { Icon(Icons.Default.Add, "Новый чат") }
                         IconButton(onClick = { screen = "settings" }) { Icon(Icons.Default.Tune, "Настройки") }
                     }
@@ -266,11 +283,9 @@ fun NeuraApp() {
                     if ((selected?.messages?.isEmpty() != false) && !busy) {
                         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                Box(Modifier.size(74.dp).background(Brush.linearGradient(listOf(accent, mint)), RoundedCornerShape(23.dp)), contentAlignment = Alignment.Center) {
-                                    Text("✦", fontSize = 42.sp, color = backgroundDark)
-                                }
-                                Text("Чем могу помочь?", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                                Text("Идеи, код, тексты и многое другое", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("n.", fontWeight = FontWeight.Light, fontSize = 58.sp, letterSpacing = (-3).sp, color = MaterialTheme.colorScheme.primary)
+                                Text("Начни с вопроса", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
+                                Text("Без лишнего. Только диалог.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Spacer(Modifier.height(8.dp))
                                 Suggestion("Напиши код на Python") { input = it }
                                 Suggestion("Помоги разобраться в сложной теме") { input = it }
@@ -297,15 +312,22 @@ fun NeuraApp() {
                         Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
                         IconButton(onClick = { error = "" }) { Icon(Icons.Default.Close, "Закрыть") }
                     }
-                    Surface(color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)) {
-                        Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 9.dp)) {
+                    Surface(color = MaterialTheme.colorScheme.surface) {
+                        Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 8.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FeatureChip("Поиск", Icons.Default.TravelExplore, web && ApiCapabilities.web(provider, model), ApiCapabilities.web(provider, model)) { web = !web; store.set("web_$provider", web) }
+                                FeatureChip("Думать", Icons.Default.Psychology, reasoning && ApiCapabilities.reasoning(provider, model), ApiCapabilities.reasoning(provider, model)) { reasoning = !reasoning; store.set("reasoning_$provider", reasoning) }
+                                Spacer(Modifier.weight(1f))
+                                Text(Providers.name(provider), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                            }
+                            Spacer(Modifier.height(8.dp))
                             Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 OutlinedTextField(input, { input = it }, modifier = Modifier.weight(1f),
-                                    placeholder = { Text("Спроси что-нибудь…") }, shape = RoundedCornerShape(21.dp),
+                                    placeholder = { Text("Спроси что-нибудь…") }, shape = RoundedCornerShape(14.dp),
                                     maxLines = 6, minLines = 1, enabled = !busy)
                                 FilledIconButton(onClick = {
                                     if (busy) activeJob?.cancel() else if (input.isNotBlank()) send(input)
-                                }, modifier = Modifier.size(52.dp), enabled = busy || input.isNotBlank(), shape = CircleShape) {
+                                }, modifier = Modifier.size(48.dp), enabled = busy || input.isNotBlank(), shape = CircleShape) {
                                     Icon(if (busy) Icons.Default.Stop else Icons.AutoMirrored.Filled.Send, if (busy) "Остановить" else "Отправить")
                                 }
                             }
@@ -314,7 +336,7 @@ fun NeuraApp() {
                                     CircularProgressIndicator(Modifier.size(11.dp), strokeWidth = 1.5.dp)
                                     Spacer(Modifier.width(7.dp))
                                 }
-                                Text(if (busy) "${Providers.name(provider)} отвечает · нажми стоп" else if (web && provider == "anthropic") "Веб-поиск включён" else "Ответы AI могут содержать ошибки",
+                                Text(if (busy) "Ответ формируется · нажми стоп" else "Поиск и размышления зависят от модели",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
                             }
                         }
@@ -368,13 +390,13 @@ private fun SettingsHeading(title: String, subtitle: String) {
 }
 
 @Composable
-private fun SettingSwitch(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+private fun SettingSwitch(title: String, subtitle: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, fontWeight = FontWeight.SemiBold)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Switch(checked = checked, onCheckedChange = onChange)
+        Switch(checked = checked, enabled = enabled, onCheckedChange = onChange)
     }
 }
 
@@ -386,7 +408,7 @@ private fun EmptyLabel(text: String) = Box(Modifier.fillMaxWidth().padding(25.dp
 @Composable
 private fun Suggestion(label: String, action: (String) -> Unit) {
     OutlinedButton(onClick = { action(label) }, shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
-        Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(16.dp))
+        Icon(Icons.Default.ArrowOutward, null, modifier = Modifier.size(16.dp))
         Spacer(Modifier.width(8.dp)); Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
@@ -397,14 +419,14 @@ private fun MessageBubble(message: Message, isStreaming: Boolean = false, onCopy
     val isUser = message.role == "user"
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (isUser) Alignment.End else Alignment.Start) {
         if (!isUser) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 6.dp)) {
-            Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(9.dp)) {
-                Text("✦", color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+            Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(8.dp)) {
+                Text("n", color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp), fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.width(7.dp))
             Text("AI", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
             if (isStreaming) { Spacer(Modifier.width(8.dp)); CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp) }
         }
-        Surface(shape = RoundedCornerShape(18.dp), color = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+        Surface(shape = RoundedCornerShape(if (isUser) 16.dp else 6.dp), color = if (isUser) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.background,
             modifier = if (isUser) Modifier.widthIn(max = 340.dp) else Modifier.fillMaxWidth()) {
             SelectionContainer { MarkdownText(message.text, modifier = Modifier.padding(14.dp)) }
         }
@@ -421,5 +443,24 @@ private fun MessageBubble(message: Message, isStreaming: Boolean = false, onCopy
 private fun TinyAction(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
     IconButton(onClick = onClick, modifier = Modifier.size(34.dp)) {
         Icon(icon, label, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+    }
+}
+
+@Composable
+private fun FeatureChip(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector,
+    enabled: Boolean, supported: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick, enabled = supported,
+        shape = RoundedCornerShape(10.dp),
+        color = if (enabled) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Row(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Icon(icon, null, modifier = Modifier.size(15.dp),
+                tint = if (supported) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f))
+            Text(label, style = MaterialTheme.typography.labelMedium,
+                color = if (supported) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f))
+            if (enabled) Icon(Icons.Default.Check, null, modifier = Modifier.size(12.dp))
+        }
     }
 }
