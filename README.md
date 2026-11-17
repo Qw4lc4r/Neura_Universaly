@@ -62,3 +62,8 @@ The workflow uses `ubuntu-24.04`, Java 17, Gradle 8.9 and SDK 35; it does **not*
 - `.github/workflows/android.yml` — CI build to APK
 
 Contributions are welcome under the MIT License. This project is independent of OpenCode, OpenAI, Anthropic, and Google.
+
+
+## Проверка исправленной версии
+
+Исправлена компиляция `SelectionContainer` (импорт в MainActivity.kt) и валидация URL (java.net.URI вместо устаревшего HttpUrl.parse). Исходники проверены статически; APK и Gradle-сборка в подготовительной среде не выполнялись из-за отсутствия Android SDK и доступа к репозиториям Gradle. Сборку проверяет GitHub Actions.
