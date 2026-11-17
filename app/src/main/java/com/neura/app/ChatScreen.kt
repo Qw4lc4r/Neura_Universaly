@@ -149,7 +149,7 @@ fun ChatScreen(
             }
         }
         Composer(
-            provider = provider, model = model, imageMode = imageMode, mediaRoute = mediaRoute, web = web, reasoning = reasoning,
+            provider = provider, protocol = protocol, model = model, imageMode = imageMode, mediaRoute = mediaRoute, web = web, reasoning = reasoning,
             input = input, onInput = onInput, pending = pending, onPickFile = onPickFile, onRemoveFile = onRemoveFile,
             busy = busy, onSend = onSend, onStop = onStop, onWeb = onWeb, onReasoning = onReasoning
         )
@@ -234,7 +234,7 @@ private fun MicroAction(icon: androidx.compose.ui.graphics.vector.ImageVector, t
 
 @Composable
 private fun Composer(
-    provider: String, model: String, imageMode: Boolean, mediaRoute: String, web: Boolean, reasoning: Boolean,
+    provider: String, protocol: String, model: String, imageMode: Boolean, mediaRoute: String, web: Boolean, reasoning: Boolean,
     input: String, onInput: (String) -> Unit, pending: List<Attachment>,
     onPickFile: () -> Unit, onRemoveFile: (Attachment) -> Unit,
     busy: Boolean, onSend: (String) -> Unit, onStop: () -> Unit,
