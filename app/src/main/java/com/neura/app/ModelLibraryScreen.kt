@@ -21,6 +21,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.CancellationException
 
 @Composable
 fun ModelLibraryScreen(
@@ -43,14 +45,20 @@ fun ModelLibraryScreen(
     var favorites by remember(provider) { mutableStateOf(store.string("favorites_$provider").split("|").filter { it.isNotBlank() }.toSet()) }
     var recent by remember(provider) { mutableStateOf(store.string("recent_$provider").split("|").filter { it.isNotBlank() }) }
     var models by remember { mutableStateOf<List<CatalogModel>>(emptyList()) }
+    val context = LocalContext.current
+    var notice by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf("") }
     var revision by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(provider, endpoint, apiKey, revision) {
-        loading = true; error = ""
+        loading = true; error = ""; notice = ""
         try {
-            models = ModelCatalog().list(provider, endpoint, apiKey)
+            val result = ModelCatalog(context.applicationContext).list(provider, endpoint, apiKey)
+            models = result.models
+            notice = result.notice
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             error = e.message ?: "Не удалось загрузить каталог"
             models = emptyList()
@@ -116,6 +124,20 @@ fun ModelLibraryScreen(
                     Text("Каталог недоступен", fontWeight = FontWeight.SemiBold)
                     Text(error, style = MaterialTheme.typography.bodySmall)
                     TextButton(onClick = { revision++ }) { Text("Повторить") }
+                }
+            }
+        }
+        if (notice.isNotBlank()) {
+            Surface(
+                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Info, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(9.dp))
+                    Text(notice, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { revision++ }) { Text("Обновить") }
                 }
             }
         }

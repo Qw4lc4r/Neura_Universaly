@@ -1,4 +1,4 @@
-# Neura Universal v5 — Android BYOK AI Client
+# Neura Universal v5.1 — Android BYOK AI Client
 
 Самостоятельный Android-клиент с интерфейсом в редакционном стиле — графит, тёплый металлический акцент, много воздуха. Исходники открыты (MIT), собственного сервера нет. Пользователь добавляет ключ API выбранного провайдера.
 
@@ -10,11 +10,18 @@
 - Вложения через системный Android-проводник, просмотр изображений и текстовых файлов, передача картинок через поддерживаемые API.
 - Генерация изображений через **OpenRouter Image API** (`POST /api/v1/images`), **OpenRouter Chat Completions** для моделей с `image`-выходом, **OpenAI Images** и **Gemini generateContent** для совместимых моделей. Модель должна поддерживать выбранный API, формат и доступ по ключу.
 - Сохранение сгенерированных изображений в `Pictures/Neura` через MediaStore, открытие через FileProvider.
-- Живой каталог моделей: OpenRouter `/models` + `/images/models`, OpenAI `/models`, Anthropic `/models`, Gemini `/models`, OpenAI-совместимые `/models` (если сервис предоставляет метод). Поиск, фильтры Free/Image/Vision/Reasoning/Favorites, избранное, recent, сортировка, ручной ID.
+- Живой каталог моделей: OpenRouter **публичные** `/models` + `/images/models` без API-ключа, OpenAI `/models`, Anthropic `/models`, Gemini `/models`, OpenAI-совместимые `/models` (если сервис предоставляет метод). Поиск, фильтры Free/Image/Vision/Reasoning/Favorites, избранное, recent, сортировка, ручной ID.
 - Настройки организованы в четыре раздела: подключение, модель, диалог, внешний вид.
 - Отдельные API-ключи на провайдера, шифрование ключей Android Keystore, история хранится локально.
 - Понятные сообщения об ошибках API, включая `429`, с кнопками выбора другой модели и повторной попытки.
 - GitHub Actions сборка `debug APK`.
+
+## Исправление каталога v5.1 — 403 на экране моделей
+
+- При открытии каталога **OpenRouter** приложение запрашивает `https://openrouter.ai/api/v1/models` и `https://openrouter.ai/api/v1/images/models` **без API-ключа**. Для получения публичного списка моделей не требуется доступ к конкретной модели.
+- Если один из публичных каталогов временно недоступен, другой отображается. Успешно загруженные каталоги сохраняются во внутреннем файле и доступны в режиме без сети после первой загрузки.
+- Для других провайдеров запрос `/models` отправляется с ключом по их требованиям. Ошибки доступа к каталогу больше не называются ошибками «доступа к модели».
+- API-ключ для чата и генерации изображений по-прежнему используется при отправке сообщения; публичный каталог **не гарантирует**, что конкретная модель будет доступна по ключу или бесплатна.
 
 ## Важно про HTTP 429
 
@@ -34,19 +41,19 @@
 
 Имя папки **внутри архива совпадает с существующей папкой `Neura-Universal`**.
 
-1. Скачай `Neura-Universal-v5-source.zip` в папку `Download`.
+1. Скачай `Neura-Universal-v5.1-catalog-fix.zip` в папку `Download`.
 2. Открой Termux, проверь что установлен `unzip`, выполнен `termux-setup-storage`.
 3. Выполни:
 
 ```bash
 cd ~/neura-universal
-unzip -o ~/storage/downloads/Neura-Universal-v5-source.zip
+unzip -o ~/storage/downloads/Neura-Universal-v5.1-catalog-fix.zip
 cd Neura-Universal
 
 git diff --check
 git status --short
 git add -A
-git commit -m "Neura v5: redesigned client and model catalog"
+git commit -m "Fix OpenRouter model catalog 403"
 git push origin main
 ```
 
@@ -91,3 +98,7 @@ gh run view "$RUN_ID" --log-failed 2>&1 | grep -E 'e: file:|\.kt:[0-9]+|FAILURE:
 - `.github/workflows/android.yml` — GitHub Actions APK
 
 Проект независим от OpenCode, OpenRouter, OpenAI, Google и Anthropic.
+
+## Проверка этого обновления
+
+`ModelCatalog.kt` прошёл локальную проверку Kotlin-компилятором с заглушками Android/сетевого API. Прямое чтение публичных каталогов подтверждено через веб-источники. Полная Gradle/Android сборка и проверка под реальным ключом **не выполнялись** в среде подготовки.
