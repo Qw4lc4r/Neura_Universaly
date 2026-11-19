@@ -1,100 +1,63 @@
-# Neura 1.1
+# Neura
 
-**Neura** — открытый Android-клиент с собственными API-ключами (BYOK). Нативный Kotlin / Jetpack Compose / Material 3, без учётной записи и без сервера Neura. Лицензия MIT.
+[Русский](#русский) · [English](#english)
 
-## Что вошло в согласованный релиз 1.1
+## Русский
 
-- **Диалоги:** локальная история, копирование, редактирование, переименование, экспорт, потоковые ответы, Markdown, подсветка блоков кода, остановка генерации.
-- **Каталог моделей:** реальная загрузка по API, поиск, фильтры по типам, бесплатности и избранному. Неподдерживаемые специализированные модели видны, но не запускаются как обычный чат.
-- **Изображения:** мультимодальный ввод, совместимые Image API и чатовые изображения, просмотр внутри приложения с масштабированием, сохранение.
-- **Аудио OpenRouter:** dedicated `POST /api/v1/audio/speech` для текста в MP3 и `POST /api/v1/audio/transcriptions` для записи в текст. Встроенное прослушивание и сохранение аудио. Поддерживаются только модели, объявляющие соответствующую задачу; голос зависит от выбранной модели.
-- **Видео OpenRouter:** `POST /api/v1/videos` → GET состояния задания → скачивание MP4 по завершении. Встроенный видеоплеер, сохранение/публикация. Задание может выполняться несколько минут и требует доступа/квоты. При остановке сохраняется его ID в частичном сообщении, но **автоматического возобновления после закрытия приложения пока нет**.
-- **Другие:** каталог специализированных моделей (например embeddings/rerank/decisions) с честным статусом — отсутствие реализации API не маскируется.
-- **Оформление:** Editorial Tech, графит, светлый металл, приглушённое золото, новая монограмма «N», анимация навигации и элементов списка, аккуратные отдельные настройки.
-- **Версия:** `versionName 1.1`, `versionCode 10` (для обновления при совместимой подписи).
+Neura — Android-клиент для общения с моделями через собственный API-ключ. Можно подключить OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek и другие сервисы или указать HTTPS-адрес своего роутера.
 
-## Как выбрать подходящую аудио/видеомодель
+- Каталог моделей с поиском, фильтрами, избранным и ручным вводом ID.
+- Потоковые ответы, Markdown, локальная история и экспорт диалогов.
+- Фото, файлы, веб-поиск, чтение публичных ссылок и рассуждения. Доступность инструментов зависит от модели и API. Для поиска с любой чат-моделью можно добавить отдельный ключ Brave Search.
+- Работа с изображениями, аудио и видео через совместимые модели. Светлая и тёмная темы с настройкой акцента и размера текста.
 
-1. В приложении открой **Библиотека моделей → Аудио** или **Видео**.
-2. В каталоге будут показаны поддерживаемые способы вызова: `TEXT → SPEECH`, `SPEECH → TEXT`, `VIDEO`.
-3. Для озвучки введи текст. Для расшифровки прикрепи аудио из файлов телефона. Для видео опиши сцену текстом.
-4. Голос, длительность и формат кадра меняются в **Настройки → Модель → MEDIA / OUTPUT**. Для неизвестной модели оставь длительность `0` (провайдер выберет значение). Выбранные параметры могут не поддерживаться конкретным провайдером.
+### Подключение
 
-Специализированные медиа-маршруты в 1.1 сделаны **для OpenRouter**. Остальные провайдеры сохраняют ранее реализованные чатовые, vision и совместимые image-маршруты. Нельзя обещать всем каталогизированным моделям универсальную совместимость: разные API могут отличаться по схеме, квотам и доступу.
+1. Откройте боковое меню → **Настройки → API**.
+2. Выберите провайдера или **Свой API**. Укажите базовый HTTPS-адрес и ключ, если он требуется. Формат запросов можно задать в разделе **Совместимость API**.
+3. Нажмите **Сохранить и выбрать модель**. Если роутер не отдаёт каталог, укажите ID модели через меню каталога.
+4. Откройте чат. Вложения, поиск и рассуждения находятся в меню **+**.
 
-## Установка / GitHub Actions
+История хранится на устройстве, API-ключи сохраняются в зашифрованном виде. Содержимое запроса и необходимые вложения передаются выбранному API. При включённом поиске через Brave поисковый запрос отправляется в Brave.
 
-Данный архив содержит папку **`Neura-Universal`** — она совпадает с твоей существующей папкой Git.
+### Сборка
 
-```bash
-cd ~/neura-universal
-unzip -o ~/storage/downloads/Neura-1.1-Universal-Search-Fix.zip
-cd Neura-Universal
-git diff --check
-git status --short
-git add -A
-git commit -m "Release Neura 1.1"
-git push origin main
-```
+Нужны JDK 17 и Android SDK Platform 35. Приложение поддерживает Android 8.0 и новее (API 26+). Откройте проект в Android Studio или укажите расположение SDK через переменную `ANDROID_HOME`.
 
-GitHub Actions автоматически запустит workflow `.github/workflows/android.yml`. После **успешной** сборки скачай артефакт `Neura-1.1-debug-apk` (внутри `app-debug.apk`).
+    ./gradlew testDebugUnitTest lintDebug assembleDebug
 
-Для проверки с Termux:
+На Windows используйте `gradlew.bat` вместо `./gradlew`. APK появится в `app/build/outputs/apk/debug/app-debug.apk`. GitHub Actions выполняет те же проверки и сохраняет APK в артефактах успешной сборки.
 
-```bash
-gh run list --limit 3
-RUN_ID=$(gh run list --limit 1 --json databaseId --jq '.[0].databaseId')
-gh run view "$RUN_ID" --log-failed | grep -E 'e: file:|^e: |\.kt:[0-9]+|error:|FAILURE' | head -n 60
-```
+В версии 1.6.1 Neura показывает причину HTTP 402 и ID запроса, когда их возвращает роутер. Если роутер явно указывает меньший допустимый максимум токенов, приложение повторяет запрос один раз с этим максимумом.
 
-**Важно про обновление:** GitHub Actions использует debug APK; ключ подписи каждого чистого runner может отличаться. Если Android не позволяет установить APK поверх старого, **не удаляй приложение без сохранения важных переписок**. Для устойчивых публичных обновлений нужна постоянная release-подпись, настроенная отдельно.
+Лицензия [MIT](LICENSE).
 
-## Безопасность и ограничения
+## English
 
-- Ключи API шифруются через Android Keystore; содержимое переписок хранится на телефоне в JSON без шифрования. Данные отправляются выбранному провайдеру при отправке запроса.
-- Для специальных медиа-запросов API-ключ передаётся только `https://openrouter.ai/api/v1`. Сторонние ссылки на файлы не получают API-ключ.
-- Текстовые вложения отправляются как текст там, где это поддерживается. PDF/DOCX и любые бинарные файлы нельзя гарантированно прочитать нейросетью без дополнительного API.
-- Некоторые модели OpenRouter в каталоге видны, но недоступны по ключу. `429` — ограничение API/провайдера, а не ошибка кода. Генерация видео может быть платной даже при нулевой стоимости текстовых токенов.
-- Поддержка медиа ограничена конкретными dedicated API; общие аудио-модели, возвращающие SSE `delta.audio`, и музыкальные генераторы, которые используют другой маршрут, пока не подключены.
-- **В подготовительной среде не было Android SDK/Gradle и нельзя было выполнить настоящую сборку и испытания на устройстве.** Проведены структурные проверки файлов/ресурсов и синтаксический просмотр Kotlin; успешная компиляция не подтверждена.
+Neura is an Android chat client for AI models that uses your own API key. Connect to OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, or another service, or enter the HTTPS address of your own gateway.
 
-## Обновление 1.1 — протоколы без привязки к названию сервиса
+- Searchable model catalog with filters, favorites, and manual model ID entry.
+- Streaming responses, Markdown, local chat history, and conversation export.
+- Photos, files, web search, public link reading, and reasoning. Tool availability depends on the model and API. A separate Brave Search API key enables web search with any chat model.
+- Image, audio, and video features through compatible models. Light and dark themes with adjustable accent color and text size.
 
-В этой сборке `versionName` остаётся **1.1**, а `versionCode` повышен до **10** для установки обновления.
+### Getting started
 
-### Как подключить собственный роутер
+1. Open the side menu → **Настройки** (Settings) → **API**.
+2. Pick a provider or choose **Свой API** (Custom API). Enter the base HTTPS URL and an API key if required. Set the request protocol under **Совместимость API** (API compatibility).
+3. Tap **Сохранить и выбрать модель** (Save and choose a model). If the gateway does not expose a catalog, enter the model ID from the catalog menu.
+4. Start a chat. Use **+** to attach files or enable web search, link reading, or reasoning.
 
-1. Открой **Настройки → Подключение → Свой API**.
-2. В пункте **Протокол запросов** выбери формат, который реализует сервер:
-   - **OpenAI-совместимый:** `/models`, `/chat/completions`, `/images/generations`, `/audio/speech`, `/audio/transcriptions`, `/videos` (не все обязательны).
-   - **OpenRouter-совместимый:** `/models?output_modalities=all`, `/images/models`, `/chat/completions`, `/images`, `/audio/*`, `/videos` (доступность зависит от сервера).
-   - **Gemini Native:** `/models`, `models/{id}:generateContent`, `models/{id}:streamGenerateContent`, и для поддерживаемых Gemini Omni `/interactions`.
-   - **Anthropic Native:** `/models`, `/messages` (чат/анализ изображения; генерация изображения не предоставляется этим API).
-   - **OpenAI (официальный):** API OpenAI с поддержкой Responses для поиска/размышлений.
-3. Введи **HTTPS Base URL**, ключ (если требуется), нажми **Сохранить ключ**.
-4. Открой **Библиотеку моделей**. Если сервер предоставляет каталог, Neura попытается прочитать возможности моделей оттуда; иначе можно **Указать модель вручную** и выбрать «Чат / Изображение / Озвучка / Расшифровка / Видео». Для изображений доступен выбор отдельного Image API или Chat API.
+Chat history stays on your device and API keys are stored encrypted. The selected API receives the request content and necessary attachments. When Brave Search is enabled, the search query is sent to Brave.
 
-Выбор модели и `output_modalities` определяют тип задачи; выбранный протокол определяет формат запроса. Нельзя вычислить протокол произвольного API только по URL. Не все серверы реализуют все перечисленные endpoint'ы. Если сервер их не реализует, Neura покажет ошибку API, а не будет притворяться, что функция доступна. Доступность определяется ключом и тарифом провайдера.
+### Build
 
-**Особенности:** Gemini Native поддерживает генерацию изображений через `generateContent`, озвучку/расшифровку через Gemini `generateContent` и видео через Gemini Omni Interactions; устаревшие Veo-модели в нативном каталоге не выдаются за полностью подключённые. Для нестандартных аудио- и видео-API нужен дополнительный адаптер. Поддержка типовых протоколов не гарантирует совместимость с любым произвольным сервером.
+Use JDK 17 and Android SDK Platform 35. The app supports Android 8.0 and later (API 26+). Open the project in Android Studio or set `ANDROID_HOME` to your SDK location.
 
-### Проверка
+    ./gradlew testDebugUnitTest lintDebug assembleDebug
 
-Статически проверены новые протоколы и каталог через локальный Kotlin-компилятор с тестовыми заглушками. Полную Android APK-компиляцию нужно выполнить в GitHub Actions. Не загружай ключи в GitHub — все они вводятся только в установленном приложении.
+On Windows, use `gradlew.bat` in place of `./gradlew`. The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`. GitHub Actions runs the same checks and saves the APK as a build artifact on success.
 
+Version 1.6.1 displays the gateway's HTTP 402 explanation and request ID when available. If the gateway specifies a lower affordable output limit, Neura retries once with that limit.
 
-## Исправление SEARCH для собственных роутеров (Neura 1.1 / build 10)
-
-- Кнопка **SEARCH** теперь активна в чатах с собственным OpenAI-совместимым и OpenRouter-совместимым сервером. Раньше она была отключена, а запрос вообще не содержал поиска.
-- **Настройки → Модель → Способ веб-поиска** (для собственного API) позволяет выбрать транспорт:
-  - **Автоматически:** OpenRouter-совместимый → `plugins: [{"id":"web"}]`; OpenAI официальный → `POST /responses` с `tools: [{"type":"web_search"}]`; OpenAI-совместимый → `POST /chat/completions` с `web_search_options`.
-  - **Chat Completions · web_search_options:** для серверов, которые реализуют параметр `web_search_options` и возвращают JSON-ответ.
-  - **OpenRouter · web plugin:** для серверов, реализующих OpenRouter web plugin в `POST /chat/completions` (возможна отдельная оплата).
-  - **Responses API · web_search:** для серверов с `POST /responses` и встроенным инструментом поиска.
-- Для Gemini и Anthropic остаются их нативные инструменты поиска. Чат и медиа без SEARCH используют прежние маршруты.
-- Если сервер отверг поисковый параметр, приложение показывает понятную ошибку и предлагает сменить способ поиска. Если OpenAI-совместимый сервер вернул ответ без метаданных поиска/источников, показывается предупреждение, что поиск не подтверждён: некоторые шлюзы просто игнорируют незнакомые параметры.
-- Если сервер возвращает `citations`/`annotations` с HTTPS-адресами, ссылки на источники добавляются к ответу.
-
-**Важно:** наличие GPT/Claude на роутере само по себе не означает доступность интернета. Стандартный OpenAI-совместимый `/chat/completions` не обязывает сервер поддерживать поиск. Если шлюз не реализует ни один из перечисленных поисковых механизмов, включить веб-поиск одной кнопкой невозможно: нужен поисковый API или дополнительный серверный инструмент. Ответ модели «я могу искать в интернете» не является подтверждением работы поиска.
-
-`versionName` остаётся **1.1**, `versionCode` = **10**. Полная сборка Android и запросы к конкретному пользовательскому роутеру не проверялись: нужны GitHub Actions и реальный API-ключ.
+Licensed under [MIT](LICENSE).

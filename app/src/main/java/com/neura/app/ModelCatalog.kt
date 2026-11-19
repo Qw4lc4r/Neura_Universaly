@@ -7,6 +7,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.ensureActive
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -22,6 +25,8 @@ data class CatalogModel(
     val outputImage: Boolean = false,
     val imageApi: Boolean = false,
     val reasoning: Boolean = false,
+    val reasoningMandatory: Boolean = false,
+    val defaultReasoningEffort: String? = null,
     val web: Boolean = false,
     val free: Boolean = false,
     val pricePrompt: Double? = null,
@@ -39,33 +44,34 @@ data class CatalogResult(val models: List<CatalogModel>, val notice: String = ""
  * In particular, OpenRouter's public model indexes MUST NOT receive the user's inference key.
  * Index metadata never proves that a model is usable with a particular key.
  */
-class ModelCatalog(private val context: Context) {
-    private val client = OkHttpClient.Builder()
+class ModelCatalog(private val directory: File, private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .followRedirects(false)
         .followSslRedirects(false)
-        .build()
+        .build()) {
+    constructor(context: Context) : this(context.filesDir)
 
     suspend fun list(provider: String, endpoint: String, key: String, protocol: String = ApiProtocols.defaultFor(provider)): CatalogResult = withContext(Dispatchers.IO) {
-        val base = endpoint.trim().trimEnd('/')
+        val base = ApiConnection.baseUrl(endpoint)
         checkSecureEndpoint(base)
         if (protocol == ApiProtocols.OPENROUTER) {
             return@withContext loadOpenRouter(provider, base, key)
         }
         val format = ApiProtocols.modelCatalogFormat(protocol)
-        val cacheFile = cacheFile("$provider|$protocol", base)
+        val cacheFile = cacheFile("$provider|$protocol", ApiConnection.identity(protocol, base, key))
         try {
-            val json = requestJson("$base/models", format, key)
-            val parsed = parseModels(format, json, false).sortedBy { it.name.lowercase() }
+            val json = requestPages(base, format, key.trim())
+            val parsed = CatalogParser.parse(format, json, false).sortedBy { it.name.lowercase() }
             if (parsed.isEmpty()) throw IllegalStateException("Сервер не вернул список моделей")
-            saveCache(cacheFile, JSONObject().put("models", json))
+            runCatching { saveCache(cacheFile, JSONObject().put("models", json)) }
             CatalogResult(parsed)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
+            if (error is ApiHttpException && error.status in setOf(401, 403)) throw error
             val cached = loadCache(cacheFile)?.optJSONObject("models")
-            val parsed = cached?.let { parseModels(format, it, false) }.orEmpty()
+            val parsed = cached?.let { CatalogParser.parse(format, it, false) }.orEmpty()
             if (parsed.isNotEmpty()) {
                 CatalogResult(parsed.sortedBy { it.name.lowercase() },
                     "Не удалось обновить каталог. Показан ранее сохранённый список. ${error.message.orEmpty()}")
@@ -75,33 +81,36 @@ class ModelCatalog(private val context: Context) {
         }
     }
 
-    private fun loadOpenRouter(provider: String, base: String, key: String): CatalogResult {
+    private suspend fun loadOpenRouter(provider: String, base: String, key: String): CatalogResult {
         // Query the configured server, not OpenRouter's public index for a custom proxy.
         // Official OpenRouter catalogue is public; custom proxies may require auth.
         val publicIndex = provider == "openrouter" && base == "https://openrouter.ai/api/v1"
         val listingAuth = if (publicIndex) "openrouter" else "openrouter-images"
         val listingKey = if (publicIndex) "" else key
-        val cacheFile = cacheFile("$provider|${ApiProtocols.OPENROUTER}", base)
+        val cacheFile = cacheFile("$provider|${ApiProtocols.OPENROUTER}", ApiConnection.identity(ApiProtocols.OPENROUTER, base, key))
         val cached = loadCache(cacheFile)
 
         // A public list of all models, independent of user credits or model access.
-        val all = runCatching {
-            runCatching { requestJson("$base/models?output_modalities=all", listingAuth, listingKey) }
+        val all = catalogAttempt {
+            catalogAttempt { requestJson("$base/models?output_modalities=all", listingAuth, listingKey) }
                 .getOrElse { requestJson("$base/models", listingAuth, listingKey) }
         }
         // Public route-specific discovery helps classify dedicated Image API models.
-        val imageRoutes = runCatching {
+        val imageRoutes = catalogAttempt {
             requestJson("$base/models?output_modalities=image", listingAuth, listingKey)
         }
         // Unlike the public /models endpoint, /images/models documents Bearer auth.
         // This call may fail with 401/403; it must never hide the public catalog.
-        val imageDetails = if (key.isNotBlank()) runCatching {
+        val imageDetails = if (key.isNotBlank()) catalogAttempt {
             requestJson("$base/images/models", "openrouter-images", key)
         } else null
 
-        val videoDetails = if (key.isNotBlank()) runCatching {
+        val videoDetails = if (key.isNotBlank()) catalogAttempt {
             requestJson("$base/videos/models", "openrouter-images", key)
         } else null
+
+        val listingError = all.exceptionOrNull()
+        if (listingError is ApiHttpException && listingError.status in setOf(401, 403)) throw listingError
 
         val allJson = all.getOrNull() ?: cached?.optJSONObject("all")
             ?: cached?.optJSONObject("models") // Migration from v5.1 text-only cache.
@@ -109,12 +118,12 @@ class ModelCatalog(private val context: Context) {
         val imageJson = imageDetails?.getOrNull() ?: cached?.optJSONObject("images")
         val videoJson = videoDetails?.getOrNull() ?: cached?.optJSONObject("videos")
 
-        val allModels = allJson?.let { parseModels("openrouter", it, false) }.orEmpty()
+        val allModels = allJson?.let { CatalogParser.parse("openrouter", it, false) }.orEmpty()
         // The image modality list is not synonymous with Image API: some models
         // produce images through /chat/completions. Inspect each model's endpoints.
-        val routes = routeJson?.let { parseModels("openrouter", it, false) }.orEmpty()
-        val images = imageJson?.let { parseModels("openrouter", it, true) }.orEmpty()
-        val videos = videoJson?.let { parseModels("openrouter", it, false, true) }.orEmpty()
+        val routes = routeJson?.let { CatalogParser.parse("openrouter", it, false) }.orEmpty()
+        val images = imageJson?.let { CatalogParser.parse("openrouter", it, true) }.orEmpty()
+        val videos = videoJson?.let { CatalogParser.parse("openrouter", it, false, true) }.orEmpty()
         val variants = allModels + routes + images + videos
 
         // The same ID can be discovered by all three endpoints. Preserve actual
@@ -128,6 +137,8 @@ class ModelCatalog(private val context: Context) {
                 outputImage = entries.any { it.outputImage },
                 imageApi = entries.any { it.imageApi },
                 reasoning = entries.any { it.reasoning },
+                reasoningMandatory = entries.any { it.reasoningMandatory },
+                defaultReasoningEffort = entries.firstNotNullOfOrNull { it.defaultReasoningEffort },
                 web = entries.any { it.web },
                 free = entries.any { it.free },
                 pricePrompt = entries.firstNotNullOfOrNull { it.pricePrompt },
@@ -175,19 +186,19 @@ class ModelCatalog(private val context: Context) {
     private fun catalogError(provider: String, error: Exception): String {
         val original = error.message.orEmpty()
         return when {
-            original.contains("HTTP 401") ->
+            error is ApiHttpException && error.status == 401 ->
                 "Каталог ${Providers.name(provider)} требует действующий API-ключ (401)."
-            original.contains("HTTP 403") ->
+            error is ApiHttpException && error.status == 403 ->
                 "Провайдер ${Providers.name(provider)} запретил запрос списка моделей (403). " +
                     "Это не означает, что конкретная модель недоступна."
-            original.contains("HTTP 404") ->
+            error is ApiHttpException && error.status == 404 ->
                 "Этот API не предоставляет каталог по адресу /models (404). " +
                     "Можно указать ID модели вручную."
             else -> "Не удалось загрузить каталог: ${original.take(180)}"
         }
     }
 
-    private fun requestJson(url: String, provider: String, key: String): JSONObject {
+    private suspend fun requestJson(url: String, provider: String, key: String): JSONObject {
         val builder = Request.Builder().get().url(url).header("Accept", "application/json")
         when (provider) {
             "anthropic" -> {
@@ -199,22 +210,44 @@ class ModelCatalog(private val context: Context) {
             "openrouter-images" -> if (key.isNotBlank()) builder.header("Authorization", "Bearer $key")
             else -> if (key.isNotBlank()) builder.header("Authorization", "Bearer $key")
         }
-        client.newCall(builder.build()).execute().use { response ->
-            val raw = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                val message = runCatching { JSONObject(raw).optJSONObject("error")?.optString("message") }
-                    .getOrNull()?.takeIf { it.isNotBlank() }.orEmpty()
-                throw IllegalStateException("HTTP ${response.code}${if (message.isBlank()) "" else ": ${message.take(160)}"}")
-            }
-            return JSONObject(raw)
+        if (RouterPresets.detect(url)?.id == "onekey" && key.isNotBlank()) {
+            builder.removeHeader("x-api-key").header("Authorization", "Bearer $key")
         }
+        return client.newCall(builder.build()).consume { response ->
+            if (!response.isSuccessful) throw response.apiFailure()
+            val raw = response.body?.string().orEmpty()
+            val trimmed = raw.trim()
+            if (trimmed.startsWith("[")) JSONObject().put("data", JSONArray(trimmed)) else JSONObject(trimmed)
+        }
+    }
+
+    private suspend fun requestPages(base: String, format: String, key: String): JSONObject {
+        val field = if (format == "gemini") "models" else "data"
+        val combined = JSONArray()
+        val cursors = mutableSetOf<String>()
+        var url = "$base/models"
+        repeat(100) {
+            coroutineContext.ensureActive()
+            val page = requestJson(url, format, key)
+            val data = page.optJSONArray(field) ?: page.optJSONArray("models") ?: JSONArray()
+            for (i in 0 until data.length()) combined.put(data.get(i))
+            val cursor = if (format == "gemini") page.optString("nextPageToken")
+                else if (page.optBoolean("has_more")) page.optString("last_id").ifBlank {
+                    data.optJSONObject(data.length() - 1)?.optString("id").orEmpty()
+                } else ""
+            if (cursor.isBlank()) return JSONObject().put(field, combined)
+            require(cursors.add(cursor)) { "API повторяет курсор каталога" }
+            url = "$base/models".toHttpUrl().newBuilder()
+                .addQueryParameter(if (format == "gemini") "pageToken" else "after_id", cursor).build().toString()
+        }
+        error("Каталог превышает 100 страниц")
     }
 
     private fun cacheFile(provider: String, endpoint: String): File {
         val digest = MessageDigest.getInstance("SHA-256")
             .digest("$provider|$endpoint".toByteArray(Charsets.UTF_8))
             .take(10).joinToString("") { "%02x".format(it.toInt() and 0xff) }
-        return File(context.filesDir, "model_catalog_$digest.json")
+        return File(directory, "model_catalog_$digest.json")
     }
 
     private fun loadCache(file: File): JSONObject? = runCatching {
@@ -234,22 +267,25 @@ class ModelCatalog(private val context: Context) {
         }
     }
 
-    private fun parseModels(provider: String, json: JSONObject, imageApi: Boolean, videoApi: Boolean = false): List<CatalogModel> {
+}
+
+internal object CatalogParser {
+    fun parse(provider: String, json: JSONObject, imageApi: Boolean, videoApi: Boolean = false): List<CatalogModel> {
         val data = json.optJSONArray(if (provider == "gemini") "models" else "data") ?: JSONArray()
         return (0 until data.length()).mapNotNull { i ->
             val model = data.optJSONObject(i) ?: return@mapNotNull null
             val id = model.optString("id").ifBlank { model.optString("name").removePrefix("models/") }
             if (id.isBlank()) return@mapNotNull null
             val architecture = model.optJSONObject("architecture")
-            val inputModalities = architecture?.optJSONArray("input_modalities").toSetStrings()
-            val outputModalities = architecture?.optJSONArray("output_modalities").toSetStrings()
+            val inputModalities = (architecture?.optJSONArray("input_modalities") ?: model.optJSONArray("input_modalities")).toSetStrings()
+            val outputModalities = (architecture?.optJSONArray("output_modalities") ?: model.optJSONArray("output_modalities")).toSetStrings()
                 .ifEmpty { if (videoApi) setOf("video") else emptySet() }
             val params = model.optJSONArray("supported_parameters").toSetStrings()
             val pricing = model.optJSONObject("pricing")
             val priceIn = pricing?.optString("prompt")?.toDoubleOrNull()
             val priceOut = pricing?.optString("completion")?.toDoubleOrNull()
             val inputImage = inputModalities.contains("image") || (provider == "gemini" && id.startsWith("gemini-"))
-            val imageOnlyId = (provider == "openai" && (id.startsWith("gpt-image-") || id.startsWith("chatgpt-image"))) ||
+            val imageOnlyId = (provider == "openai" && (id.startsWith("gpt-image-") || id.startsWith("chatgpt-image") || id.startsWith("dall-e-"))) ||
                 (provider == "gemini" && (id.contains("-image") || id.contains("imagen")))
             val outputImage = imageApi || outputModalities.contains("image") || imageOnlyId
             val endpointPaths = model.optJSONArray("endpoints").toSetStrings()
@@ -266,7 +302,10 @@ class ModelCatalog(private val context: Context) {
             } || model.has("pricing_skus")
             val isFree = id.endsWith(":free") || (provider == "openrouter" && !mediaProduct &&
                 priceIn == 0.0 && priceOut == 0.0 && !anyPaidCharge)
-            val searchText = (id + " " + model.optString("name") + " " + model.optString("description")).lowercase()
+            val searchText = (id + " " + model.optString("name")).lowercase()
+            val methods = model.optJSONArray("supportedGenerationMethods").toSetStrings()
+            val specialized = (provider == "gemini" && (id.startsWith("imagen-") || id.startsWith("veo-"))) || id.contains("embedding", true) || id.contains("rerank", true) || id.contains("moderation", true) ||
+                (provider == "gemini" && methods.isNotEmpty() && methods.none { it in setOf("generateContent", "predict", "predictLongRunning") })
             val isTranscription = ("transcription" in outputModalities) ||
                 searchText.contains("speech-to-text") || searchText.contains("transcription") ||
                 searchText.contains("transcribe") || searchText.contains("whisper") ||
@@ -276,7 +315,8 @@ class ModelCatalog(private val context: Context) {
             val nativeGeminiVideo = provider == "gemini" && (id.startsWith("veo-") || id.startsWith("gemini-omni-"))
             val nativeGeminiAudio = provider == "gemini" && id.contains("tts")
             val route = when {
-                videoApi || "video" in outputModalities || nativeGeminiVideo -> MediaRoute.VIDEO
+                specialized -> MediaRoute.UNSUPPORTED
+                videoApi || "video" in outputModalities || nativeGeminiVideo || (provider == "openai" && id.startsWith("sora-")) -> MediaRoute.VIDEO
                 imageApi || outputImage -> MediaRoute.IMAGE
                 isTranscription -> MediaRoute.TRANSCRIPTION
                 isSpeech || nativeGeminiAudio -> MediaRoute.SPEECH
@@ -286,13 +326,16 @@ class ModelCatalog(private val context: Context) {
             }
             CatalogModel(
                 id = id,
-                name = model.optString("name").ifBlank { model.optString("display_name").ifBlank { id } },
+                name = model.optString("displayName").ifBlank { model.optString("display_name").ifBlank { model.optString("name").ifBlank { id } } },
                 description = model.optString("description"),
                 context = model.optInt("context_length", model.optInt("inputTokenLimit", 0)),
                 inputImage = inputImage,
                 outputImage = outputImage,
                 imageApi = imageApi || supportsImageEndpoint || (provider == "openai" && imageOnlyId),
-                reasoning = params.any { it.contains("reasoning") } || model.optBoolean("reasoning", false) || model.has("reasoning"),
+                reasoning = params.any { it.contains("reasoning") } || model.optBoolean("reasoning", false) || model.optJSONObject("reasoning") != null,
+                reasoningMandatory = model.optJSONObject("reasoning")?.optBoolean("mandatory") == true,
+                defaultReasoningEffort = model.optJSONObject("reasoning")?.optString("default_effort")
+                    ?.takeIf { it in setOf("minimal", "low", "medium", "high", "xhigh", "max") },
                 web = params.any { it.contains("web") },
                 free = isFree,
                 pricePrompt = priceIn,
@@ -310,8 +353,16 @@ class ModelCatalog(private val context: Context) {
                     }
                 }
             )
-        }
+        }.distinctBy { it.id }
     }
+}
+
+private suspend fun <T> catalogAttempt(block: suspend () -> T): Result<T> = try {
+    Result.success(block())
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (error: Exception) {
+    Result.failure(error)
 }
 
 private fun JSONArray?.toSetStrings(): Set<String> {
@@ -319,9 +370,4 @@ private fun JSONArray?.toSetStrings(): Set<String> {
     return (0 until length()).mapNotNull { optString(it).takeIf(String::isNotBlank) }.toSet()
 }
 
-fun checkSecureEndpoint(base: String) {
-    val uri = java.net.URI(base)
-    require(uri.scheme.equals("https", ignoreCase = true) && !uri.host.isNullOrEmpty() && uri.rawUserInfo == null && uri.fragment == null && uri.query == null) {
-        "Нужен корректный HTTPS API endpoint без логина или параметров"
-    }
-}
+fun checkSecureEndpoint(base: String) { ApiConnection.baseUrl(base) }

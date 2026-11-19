@@ -1,43 +1,44 @@
 package com.neura.app
 
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     provider: String, protocol: String, apiKey: String, endpoint: String, model: String,
     imageMode: Boolean, web: Boolean, reasoning: Boolean,
-    webMode: String, systemPrompt: String, maxTokens: String, temperature: String, dark: Boolean,
+    systemPrompt: String, maxTokens: String, temperature: String, dark: Boolean,
+    routerProfile: String, onRouterProfile: (String) -> Unit,
+    reasoningFormat: ReasoningFormat, onReasoningFormat: (ReasoningFormat) -> Unit,
+    appearance: Appearance, onAppearance: (Appearance) -> Unit,
+    profiles: List<ConnectionProfile>,
+    store: LocalStore,
+    onDeleteProfile: () -> Unit,
     onBack: () -> Unit,
     onProvider: (String) -> Unit,
     onProtocol: (String) -> Unit,
-    onKey: (String) -> Unit,
-    onSaveKey: () -> Unit,
-    onEndpoint: (String) -> Unit,
+    onSaveConnection: (String, String) -> Unit,
     onModelLibrary: () -> Unit,
     onImageMode: (Boolean) -> Unit,
     onWeb: (Boolean) -> Unit,
-    onWebMode: (String) -> Unit,
     onReasoning: (Boolean) -> Unit,
     onPrompt: (String) -> Unit,
     onTokens: (String) -> Unit,
@@ -48,140 +49,116 @@ fun SettingsScreen(
     videoRatio: String, onVideoRatio: (String) -> Unit
 ) {
     var providerMenu by remember { mutableStateOf(false) }
-    var protocolMenu by remember { mutableStateOf(false) }
-    var webModeMenu by remember { mutableStateOf(false) }
-    var showKey by remember { mutableStateOf(false) }
-    var section by remember { mutableStateOf("Подключение") }
+    var showKey by remember(provider) { mutableStateOf(false) }
+    var draftEndpoint by remember(provider, endpoint) { mutableStateOf(endpoint) }
+    var draftKey by remember(provider, endpoint, apiKey) { mutableStateOf(apiKey) }
+    val savedPresetConnections = remember(provider) { RouterPresets.all
+        .filter { it.id !in Providers.ids && (it.id == provider || store.loadKey(it.id).isNotBlank() || store.string("endpoint_${it.id}").isNotBlank()) }
+        .map { ConnectionProfile(it.id, it.name) } }
+    var showSaved by remember { mutableStateOf(false) }
+    val savedConnections = profiles + savedPresetConnections
+    var section by rememberSaveable { mutableStateOf("Подключение") }
+    var deleteProfile by remember { mutableStateOf(false) }
+    val endpointError = remember(draftEndpoint) { runCatching { ApiConnection.baseUrl(draftEndpoint) }.exceptionOrNull()?.message }
+    val providerName = profiles.firstOrNull { it.id == provider }?.name ?: Providers.name(provider)
 
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 20.dp, top = 10.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") }
-            Column(Modifier.weight(1f)) {
-                Text("PREFERENCES / 01", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace,
-                    letterSpacing = 1.2.sp, color = MaterialTheme.colorScheme.primary)
-                Text("Настройки", fontSize = 25.sp, fontWeight = FontWeight.Medium)
-            }
-        }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("Подключение", "Модель", "Диалог", "Внешний вид").forEachIndexed { index, name ->
-                val active = section == name
-                Surface(onClick = { section = name }, shape = RoundedCornerShape(12.dp),
-                    color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, if (active) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f) else MaterialTheme.colorScheme.outlineVariant)) {
-                    Row(Modifier.padding(vertical = 12.dp, horizontal = 15.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("0${index + 1}", fontSize = 10.sp, fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.width(8.dp))
-                        Text(name, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
-                    }
+    if (showSaved) AlertDialog(onDismissRequest = { showSaved = false },
+        title = { Text("Сохранённые подключения") },
+        text = {
+            Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                savedConnections.forEach { saved ->
+                    TextButton(onClick = { onProvider(saved.id); showSaved = false }) { Text(saved.name) }
                 }
             }
+        },
+        confirmButton = { TextButton(onClick = { showSaved = false }) { Text("Закрыть") } })
+    if (deleteProfile) AlertDialog(onDismissRequest = { deleteProfile = false },
+        title = { Text("Удалить подключение?") },
+        text = { Text("$providerName: адрес, ключ и настройки будут удалены. Переписки сохранятся.") },
+        confirmButton = { TextButton(onClick = { onDeleteProfile(); deleteProfile = false }) { Text("Удалить") } },
+        dismissButton = { TextButton(onClick = { deleteProfile = false }) { Text("Отмена") } })
+
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+    Column(Modifier.widthIn(max = 640.dp).fillMaxSize()) {
+        ScreenHeader("Настройки", onBack)
+        FlowRow(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("Подключение" to "API", "Модель" to "Модель", "Диалог" to "Диалог", "Внешний вид" to "Вид").forEach { (name, label) ->
+                FilterChip(selected = section == name, onClick = { section = name }, label = { Text(label) },
+                    shape = RoundedCornerShape(50))
+            }
         }
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 12.dp),
+        key(section) { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(15.dp)) {
             when (section) {
                 "Подключение" -> {
-                    SettingsIntro("01", "Твои подключения", "Ключи хранятся на устройстве. Никакого аккаунта Neura.")
                     SettingsPanel {
-                        Text("ПРОВАЙДЕР", style = MaterialTheme.typography.labelSmall, letterSpacing = 1.sp)
+                        Text("Провайдер", style = MaterialTheme.typography.titleMedium)
                         Box {
                             OutlinedButton(onClick = { providerMenu = true }, modifier = Modifier.fillMaxWidth()) {
                                 Icon(Icons.Default.Hub, null, Modifier.size(18.dp))
                                 Spacer(Modifier.width(10.dp))
-                                Text(Providers.name(provider), modifier = Modifier.weight(1f))
+                                Text(providerName, modifier = Modifier.weight(1f))
                                 Icon(Icons.Default.KeyboardArrowDown, null)
                             }
                             DropdownMenu(providerMenu, onDismissRequest = { providerMenu = false }) {
                                 Providers.ids.forEach { candidate ->
                                     DropdownMenuItem(text = { Text(Providers.name(candidate)) }, onClick = { onProvider(candidate); providerMenu = false })
                                 }
-                            }
-                        }
-                        Text("ПРОТОКОЛ ЗАПРОСОВ", style = MaterialTheme.typography.labelSmall, letterSpacing = 1.sp)
-                        Box {
-                            OutlinedButton(
-                                onClick = { if (provider == "custom") protocolMenu = true },
-                                enabled = provider == "custom", modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text(ApiProtocols.label(protocol), modifier = Modifier.weight(1f))
-                                if (provider == "custom") Icon(Icons.Default.KeyboardArrowDown, "Выбрать протокол")
-                            }
-                            DropdownMenu(protocolMenu, onDismissRequest = { protocolMenu = false }) {
-                                ApiProtocols.customizable.forEach { item ->
-                                    DropdownMenuItem(text = { Text(ApiProtocols.label(item)) }, onClick = {
-                                        onProtocol(item)
-                                        protocolMenu = false
-                                    })
+                                if (savedConnections.isNotEmpty()) {
+                                    HorizontalDivider()
+                                    DropdownMenuItem(text = { Text("Сохранённые подключения") },
+                                        onClick = { providerMenu = false; showSaved = true })
                                 }
                             }
                         }
-                        Text(
-                            if (provider == "custom") "Выбери формат, который действительно реализует твой сервер. Адрес и ID модели сами по себе не определяют протокол."
-                            else "Формат задаётся выбранным провайдером. Для собственного сервера выбери «Свой API». В списке поддержаны несколько протоколов.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        OutlinedTextField(endpoint, onEndpoint, modifier = Modifier.fillMaxWidth(),
-                            label = { Text("Адрес API (HTTPS)") }, singleLine = true)
-                        OutlinedTextField(apiKey, onKey, modifier = Modifier.fillMaxWidth(), label = { Text("API-ключ") }, singleLine = true,
+                        if (profiles.any { it.id == provider }) TextButton(onClick = { deleteProfile = true }) {
+                            Text("Удалить сохранённое подключение")
+                        }
+                        OutlinedTextField(draftEndpoint, { next ->
+                            draftEndpoint = next
+                            if (draftKey == apiKey && !ApiConnection.sameOrigin(endpoint, next) &&
+                                runCatching { ApiConnection.baseUrl(next) }.isSuccess) draftKey = ""
+                        }, modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Адрес API (HTTPS)") }, singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                            isError = draftEndpoint.isNotBlank() && endpointError != null,
+                            supportingText = if (draftEndpoint.isNotBlank() && endpointError != null) {
+                                { Text(endpointError) }
+                            } else null)
+                        OutlinedTextField(draftKey, { draftKey = it }, modifier = Modifier.fillMaxWidth(), label = { Text("API-ключ") }, singleLine = true,
                             visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
                             trailingIcon = {
                                 IconButton(onClick = { showKey = !showKey }) {
                                     Icon(if (showKey) Icons.Default.VisibilityOff else Icons.Default.Visibility, "Показать ключ")
                                 }
                             })
-                        Button(onClick = onSaveKey, modifier = Modifier.fillMaxWidth()) {
-                            Icon(Icons.Default.Lock, null, Modifier.size(17.dp))
-                            Spacer(Modifier.width(8.dp)); Text("Сохранить ключ")
+                        Button(onClick = { onSaveConnection(draftEndpoint, draftKey) },
+                            enabled = endpointError == null && (draftKey.isNotBlank() || Providers.isCustom(provider)), modifier = Modifier.fillMaxWidth()) {
+                            Text("Сохранить и выбрать модель")
                         }
+                        if (Providers.configurable(provider)) ApiCompatibility(
+                            provider, protocol, draftEndpoint, routerProfile, reasoningFormat,
+                            onProtocol, onRouterProfile, onReasoningFormat
+                        )
                     }
-                    Text("Доступны форматы OpenAI, OpenRouter, Gemini и Anthropic. Конкретные медиа-возможности зависят от сервера и модели.",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    AccountBalancePanel(provider, protocol, endpoint, apiKey, store)
                 }
                 "Модель" -> {
-                    SettingsIntro("02", "Управление моделью", "Выбор из живого каталога и настройки генерации.")
                     SettingsPanel {
-                        Text("ТЕКУЩАЯ МОДЕЛЬ", style = MaterialTheme.typography.labelSmall, letterSpacing = 1.sp)
-                        Text(model, style = MaterialTheme.typography.bodyLarge, fontFamily = FontFamily.Monospace)
+                        Text("Текущая модель", style = MaterialTheme.typography.titleMedium)
+                        Text(model.ifBlank { "Модель ещё не выбрана" }, style = MaterialTheme.typography.bodyLarge)
                         OutlinedButton(onClick = onModelLibrary, modifier = Modifier.fillMaxWidth()) {
                             Icon(Icons.Default.Search, null, Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp)); Text("Открыть библиотеку моделей")
                         }
                         HorizontalDivider()
-                        SettingsSwitch("Режим изображения", "Использовать Image API, только для совместимых моделей", imageMode, onImageMode)
-                        SettingsSwitch("Поиск в интернете", "Запрашивать реальный поиск через API выбранного роутера", web, onWeb)
-                        if (provider == "custom" && protocol in setOf(ApiProtocols.OPENAI_COMPAT, ApiProtocols.OPENROUTER, ApiProtocols.OPENAI)) {
-                            Text("СПОСОБ ВЕБ-ПОИСКА", style = MaterialTheme.typography.labelSmall, letterSpacing = 1.sp)
-                            Box {
-                                OutlinedButton(onClick = { webModeMenu = true }, modifier = Modifier.fillMaxWidth()) {
-                                    Text(WebSearchModes.label(webMode), modifier = Modifier.weight(1f))
-                                    Icon(Icons.Default.KeyboardArrowDown, "Выбрать способ поиска")
-                                }
-                                DropdownMenu(webModeMenu, onDismissRequest = { webModeMenu = false }) {
-                                    WebSearchModes.options(protocol).forEach { option ->
-                                        DropdownMenuItem(text = { Text(WebSearchModes.label(option)) }, onClick = {
-                                            onWebMode(option); webModeMenu = false
-                                        })
-                                    }
-                                }
-                            }
-                            Text(
-                                "OpenAI-совместимость не гарантирует интернет-поиск. " +
-                                    "Авто: для OpenRouter — web plugin, для OpenAI — Responses, " +
-                                    "для остальных — web_search_options. " +
-                                    "Если сервер не поддерживает выбранный способ, попробуй другой или обратись к его документации. " +
-                                    "Поиск может тарифицироваться отдельно.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        SettingsSwitch("Размышления", "Когда модель поддерживает reasoning", reasoning, onReasoning)
+                        SettingsSwitch("Режим изображения", "Использовать Image API, только для совместимых моделей", imageMode, onImageMode, ApiProtocols.canRun(protocol, MediaRoute.IMAGE))
+                        SettingsSwitch("Поиск в интернете", "Параметры отправляются в формате выбранного протокола", web, onWeb, ApiCapabilities.web(protocol, model))
+                        SettingsSwitch("Размышления", "Модели с обязательным thinking могут рассуждать всегда", reasoning, onReasoning, ApiCapabilities.reasoning(protocol, model))
                     }
                     SettingsPanel {
-                        Text("MEDIA / OUTPUT", fontFamily = FontFamily.Monospace, fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.primary, letterSpacing = 1.4.sp)
+                        Text("Аудио и видео", style = MaterialTheme.typography.titleMedium)
                         Text("Для OpenRouter: голос и параметры видео. Не все модели принимают каждое значение.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         OutlinedTextField(voice, onVoice, Modifier.fillMaxWidth(), singleLine = true,
@@ -203,61 +180,179 @@ fun SettingsScreen(
                         }
                     }
                     SettingsPanel {
+                        Text("Генерация", style = MaterialTheme.typography.titleMedium)
                         OutlinedTextField(maxTokens, onTokens, Modifier.fillMaxWidth(), label = { Text("Максимум токенов") },
-                            singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-                        OutlinedTextField(temperature, onTemperature, Modifier.fillMaxWidth(), label = { Text("Температура (0–1)") },
+                            singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            supportingText = { Text("Предел длины ответа. Роутер может использовать его при проверке стоимости запроса.") })
+                        OutlinedTextField(temperature, onTemperature, Modifier.fillMaxWidth(), label = { Text("Температура (0–2)") },
                             singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
                     }
                 }
                 "Диалог" -> {
-                    SettingsIntro("03", "Поведение ассистента", "Установи собственный характер и контекст.")
                     SettingsPanel {
-                        OutlinedTextField(systemPrompt, onPrompt, modifier = Modifier.fillMaxWidth(), minLines = 7,
+                        OutlinedTextField(systemPrompt, onPrompt, modifier = Modifier.fillMaxWidth(), minLines = 4, maxLines = 9,
                             label = { Text("Системная инструкция") })
                         Text("Ответы, файлы и изображения отправляются напрямую выбранному API. История остаётся локально на устройстве.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    WebSearchSettings(store)
                 }
                 "Внешний вид" -> {
-                    SettingsIntro("04", "Оформление", "Типографика, цвет и движение без лишних эффектов.")
                     SettingsPanel {
-                        SettingsSwitch("Тёмная тема", "Графит / тёплый металл", dark, onTheme)
-                        Text("NEURA / RELEASE 1.1", fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary,
-                            letterSpacing = 2.sp, fontSize = 11.sp)
+                        Text("Тема", style = MaterialTheme.typography.titleMedium)
+                        SettingsSwitch("Системная тема", "Автоматически светлая или тёмная", appearance.systemTheme,
+                            { onAppearance(appearance.copy(systemTheme = it)) })
+                        if (!appearance.systemTheme) SettingsSwitch("Тёмная тема", "Мягкие тёмные поверхности", dark, onTheme)
+                        Text("Акцентный цвет", style = MaterialTheme.typography.titleSmall)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("moss" to "Мох", "violet" to "Ирис", "blue" to "Океан", "mint" to "Мята").forEach { (id, label) ->
+                                FilterChip(appearance.accent == id, { onAppearance(appearance.copy(accent = id)) }, label = { Text(label) })
+                            }
+                        }
+                        Text("Размер текста · ${(appearance.textScale * 100).toInt()}%")
+                        Slider(appearance.textScale, { onAppearance(appearance.copy(textScale = it)) }, valueRange = .85f..1.3f, steps = 8)
+                    }
+                    SettingsPanel {
+                        Text("Чат", style = MaterialTheme.typography.titleMedium)
+                        SettingsSwitch("Компактные сообщения", "Меньше расстояния между ответами", appearance.compact,
+                            { onAppearance(appearance.copy(compact = it)) })
+                        SettingsSwitch("Название модели в ответах", "Показывать модель над сообщением", appearance.showModel,
+                            { onAppearance(appearance.copy(showModel = it)) })
+                        SettingsSwitch("Следовать за ответом", "Прокручивать чат во время генерации", appearance.autoScroll,
+                            { onAppearance(appearance.copy(autoScroll = it)) })
                     }
                 }
             }
             Spacer(Modifier.height(30.dp))
+        } }
+    }
+    }
+}
+
+@Composable
+private fun ApiCompatibility(
+    provider: String, protocol: String, endpoint: String, profile: String, format: ReasoningFormat,
+    onProtocol: (String) -> Unit, onProfile: (String) -> Unit, onFormat: (ReasoningFormat) -> Unit
+) {
+    var open by remember(provider) { mutableStateOf(false) }
+    TextButton(onClick = { open = !open }) {
+        Text("Совместимость API")
+        Icon(if (open) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
+    }
+    if (open) {
+        val profiles = listOf("auto" to "Авто по адресу API", "generic" to "Общий формат") + RouterPresets.all.map { it.id to it.name }
+        ApiOption("Протокол", ApiProtocols.label(protocol), ApiProtocols.customizable.map { it to ApiProtocols.label(it) }, onProtocol)
+        ApiOption("Профиль", profiles.firstOrNull { it.first == profile }?.second ?: "Авто по адресу API", profiles, onProfile)
+        RouterPresets.resolve(profile, endpoint)?.note?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (protocol in setOf(ApiProtocols.OPENAI_COMPAT, ApiProtocols.OPENROUTER)) {
+            ApiOption("Параметр рассуждений", format.label, ReasoningFormat.entries.map { it to it.label }, onFormat)
         }
     }
 }
 
 @Composable
-private fun SettingsIntro(number: String, title: String, description: String) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("SECTION $number", fontSize = 10.sp, letterSpacing = 2.sp, fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.primary)
-        Text(title, fontSize = 25.sp, fontWeight = FontWeight.Medium)
-        Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun <T> ApiOption(title: String, value: String, options: List<Pair<T, String>>, onSelect: (T) -> Unit) {
+    var menu by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box {
+            OutlinedButton(onClick = { menu = true }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+                Text(value, Modifier.weight(1f)); Icon(Icons.Default.ExpandMore, null)
+            }
+            DropdownMenu(menu, onDismissRequest = { menu = false }) {
+                options.forEach { (option, label) ->
+                    DropdownMenuItem(text = { Text(label) }, onClick = { menu = false; onSelect(option) })
+                }
+            }
+        }
     }
 }
 
 @Composable
 private fun SettingsPanel(content: @Composable ColumnScope.() -> Unit) {
-    Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp), content = content)
+    Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainerLow, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
     }
 }
 
 @Composable
-private fun SettingsSwitch(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+private fun SettingsSwitch(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit, enabled: Boolean = true) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, fontWeight = FontWeight.Medium)
             Text(subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Spacer(Modifier.width(8.dp))
-        Switch(checked = checked, onCheckedChange = onChange)
+        Switch(checked = checked && enabled, onCheckedChange = onChange, enabled = enabled)
     }
 }
+
+@Composable
+private fun WebSearchSettings(store: LocalStore) {
+    var key by remember { mutableStateOf(store.loadKey("brave_search")) }
+    var status by remember { mutableStateOf("") }
+    SettingsPanel {
+        Text("Поиск через Brave", style = MaterialTheme.typography.titleMedium)
+        Text("С этим ключом поиск работает через Brave с любой чат-моделью. При включённом поиске текст текущего запроса отправляется в Brave.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        OutlinedTextField(key, { key = it; status = "" }, Modifier.fillMaxWidth(), singleLine = true,
+            label = { Text("Ключ Brave Search API") }, visualTransformation = PasswordVisualTransformation())
+        TextButton(onClick = {
+            status = runCatching { store.saveKey(key.trim(), "brave_search") }
+                .fold({ if (key.isBlank()) "Ключ удалён" else "Ключ сохранён" }, { "Не удалось сохранить ключ" })
+        }) { Text("Сохранить ключ поиска") }
+        if (status.isNotBlank()) Text(status, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun AccountBalancePanel(provider: String, protocol: String, endpoint: String, key: String, store: LocalStore) {
+    val scope = rememberCoroutineScope()
+    var path by remember(provider) { mutableStateOf(store.string("balance_path_$provider")) }
+    var field by remember(provider) { mutableStateOf(store.string("balance_field_$provider")) }
+    var unit by remember(provider) { mutableStateOf(store.string("balance_unit_$provider")) }
+    var expanded by remember(provider) { mutableStateOf(false) }
+    var result by remember(provider, endpoint, key, path, field, unit) { mutableStateOf("") }
+    var running by remember(provider, endpoint, key, path, field, unit) { mutableStateOf(false) }
+    val openRouter = RouterPresets.detect(endpoint)?.id == "openrouter"
+    SettingsPanel {
+        Text("Баланс API", style = MaterialTheme.typography.titleMedium)
+        Text(if (openRouter) "OpenRouter показывает остаток лимита ключа в долларах."
+            else "Если роутер отдаёт остаток через GET API, укажи путь и поле из его документации.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        TextButton(onClick = { expanded = !expanded }) {
+            Text(if (expanded) "Скрыть настройку баланса" else "Настроить адрес баланса")
+        }
+        if (expanded) {
+            OutlinedTextField(path, { path = it; store.set("balance_path_$provider", it) }, Modifier.fillMaxWidth(),
+                singleLine = true, label = { Text("Путь на том же сервере") }, placeholder = { Text("/v1/balance") })
+            OutlinedTextField(field, { field = it; store.set("balance_field_$provider", it) }, Modifier.fillMaxWidth(),
+                singleLine = true, label = { Text("JSON-поле") }, placeholder = { Text("data.remaining_tokens") })
+            OutlinedTextField(unit, { unit = it; store.set("balance_unit_$provider", it) }, Modifier.fillMaxWidth(),
+                singleLine = true, label = { Text("Единица измерения") }, placeholder = { Text("токенов") })
+        }
+        FilledTonalButton(
+            enabled = !running && endpoint.isNotBlank() && (openRouter || path.isNotBlank() && field.isNotBlank()),
+            onClick = {
+                val resultState = ""
+                result = resultState
+                running = true
+                scope.launch {
+                    try {
+                        result = RouterBalance.read(endpoint, key.trim(), protocol, path, field, unit)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        result = failure.message ?: "Не удалось получить баланс"
+                    } finally {
+                        running = false
+                    }
+                }
+            }
+        ) { Text(if (running) "Проверяю…" else "Обновить баланс") }
+        if (result.isNotBlank()) Text(result, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+

@@ -1,13 +1,9 @@
 package com.neura.app
 
-import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.media.MediaPlayer
 import android.net.Uri
-import android.os.Build
-import android.os.Environment
-import android.provider.MediaStore
 import android.widget.MediaController
 import android.widget.Toast
 import android.widget.VideoView
@@ -36,37 +32,6 @@ private fun sharedUri(context: Context, attachment: Attachment): Uri {
     } else source
 }
 
-fun saveGeneratedMedia(context: Context, attachment: Attachment) {
-    if (Build.VERSION.SDK_INT < 29) {
-        Toast.makeText(context, "Сохранение медиа поддерживается на Android 10+", Toast.LENGTH_LONG).show()
-        return
-    }
-    val isVideo = attachment.mimeType.startsWith("video/")
-    val collection = if (isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-    val parent = if (isVideo) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_MUSIC
-    val values = ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, attachment.name)
-        put(MediaStore.MediaColumns.MIME_TYPE, attachment.mimeType)
-        put(MediaStore.MediaColumns.RELATIVE_PATH, "$parent/Neura")
-        put(MediaStore.MediaColumns.IS_PENDING, 1)
-    }
-    val resolver = context.contentResolver
-    val result = resolver.insert(collection, values) ?: error("Нельзя создать медиафайл")
-    try {
-        resolver.openInputStream(Uri.parse(attachment.uri))?.use { source ->
-            resolver.openOutputStream(result)?.use { target -> source.copyTo(target) }
-                ?: error("Ошибка записи")
-        } ?: error("Исходный файл не найден")
-        values.clear()
-        values.put(MediaStore.MediaColumns.IS_PENDING, 0)
-        resolver.update(result, values, null, null)
-        Toast.makeText(context, "Сохранено в $parent/Neura", Toast.LENGTH_SHORT).show()
-    } catch (e: Exception) {
-        resolver.delete(result, null, null)
-        throw e
-    }
-}
-
 private fun shareMedia(context: Context, attachment: Attachment) {
     val uri = sharedUri(context, attachment)
     context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
@@ -79,6 +44,7 @@ private fun shareMedia(context: Context, attachment: Attachment) {
 @Composable
 fun MediaAttachmentCard(attachment: Attachment, allowDownload: Boolean) {
     val context = LocalContext.current
+    val saveAttachment = rememberAttachmentSaver()
     val video = attachment.mimeType.startsWith("video/")
     var openVideo by remember(attachment.uri) { mutableStateOf(false) }
     val audio = !video
@@ -88,7 +54,7 @@ fun MediaAttachmentCard(attachment: Attachment, allowDownload: Boolean) {
     var playing by remember(attachment.uri) { mutableStateOf(false) }
     DisposableEffect(player) {
         player?.setOnCompletionListener { playing = false }
-        onDispose { runCatching { player?.stop(); player?.release() } }
+        onDispose { runCatching { player?.release() } }
     }
     Surface(
         shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface,
@@ -128,7 +94,7 @@ fun MediaAttachmentCard(attachment: Attachment, allowDownload: Boolean) {
                 Spacer(Modifier.weight(1f))
                 if (allowDownload && attachment.uri.startsWith("file:")) {
                     IconButton(onClick = {
-                        runCatching { saveGeneratedMedia(context, attachment) }.onFailure {
+                        runCatching { saveAttachment(attachment) }.onFailure {
                             Toast.makeText(context, it.message ?: "Не удалось сохранить", Toast.LENGTH_LONG).show()
                         }
                     }) { Icon(Icons.Default.Download, "Скачать") }
@@ -157,7 +123,7 @@ fun MediaAttachmentCard(attachment: Attachment, allowDownload: Boolean) {
                             setVideoURI(Uri.parse(attachment.uri))
                             setOnPreparedListener { start() }
                         }
-                    }, modifier = Modifier.fillMaxWidth().weight(1f))
+                    }, onRelease = { it.stopPlayback() }, modifier = Modifier.fillMaxWidth().weight(1f))
                 }
             }
         }

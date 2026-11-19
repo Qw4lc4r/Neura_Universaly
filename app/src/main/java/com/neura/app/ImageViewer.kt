@@ -54,6 +54,7 @@ data class ImagePreview(
 @Composable
 fun ImageViewerDialog(image: ImagePreview, onDismiss: () -> Unit) {
     val context = LocalContext.current
+    val saveAttachment = rememberAttachmentSaver()
     var scale by remember(image.uri) { mutableFloatStateOf(1f) }
     var offset by remember(image.uri) { mutableStateOf(Offset.Zero) }
     var controlsVisible by remember(image.uri) { mutableStateOf(true) }
@@ -73,8 +74,7 @@ fun ImageViewerDialog(image: ImagePreview, onDismiss: () -> Unit) {
         runCatching {
             when (Uri.parse(image.uri).scheme?.lowercase()) {
                 "http", "https" -> saveRemoteImage(context, image.uri)
-                "file", "content" -> saveGeneratedImage(
-                    context,
+                "file", "content" -> saveAttachment(
                     image.attachment ?: Attachment(
                         name = image.name.ifBlank { "neura-image-${System.currentTimeMillis()}.png" },
                         uri = image.uri,

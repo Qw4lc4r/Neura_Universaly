@@ -26,7 +26,11 @@ data class Message(
     val role: String,
     val text: String,
     val timestamp: Long = System.currentTimeMillis(),
-    val attachments: List<Attachment> = emptyList()
+    val attachments: List<Attachment> = emptyList(),
+    val model: String = "",
+    val status: String = "complete",
+    val reasoning: String = "",
+    val reasoningRequested: Boolean = false
 )
 
 data class Conversation(
@@ -37,11 +41,42 @@ data class Conversation(
 )
 
 class LocalStore(private val context: Context) {
+    var historyError: String = ""
+        private set
     private val prefs = context.getSharedPreferences("neura_settings", Context.MODE_PRIVATE)
     fun string(key: String, default: String = "") = prefs.getString(key, default) ?: default
     fun bool(key: String, default: Boolean = false) = prefs.getBoolean(key, default)
     fun set(key: String, value: String) = prefs.edit().putString(key, value).apply()
     fun set(key: String, value: Boolean) = prefs.edit().putBoolean(key, value).apply()
+
+    fun profiles(): List<ConnectionProfile> = runCatching {
+        val array = JSONArray(string("connection_profiles", "[]"))
+        (0 until array.length()).map { array.getJSONObject(it) }
+            .map { ConnectionProfile(it.getString("id"), it.getString("name")) }
+            .filter { it.id.startsWith("custom_") }.distinctBy { it.id }
+    }.getOrDefault(emptyList())
+
+    fun addProfile(name: String): ConnectionProfile {
+        val profile = ConnectionProfile("custom_${UUID.randomUUID()}", name.trim().ifBlank { "Мой API" })
+        saveProfiles(profiles() + profile)
+        return profile
+    }
+
+    fun removeProfile(id: String) {
+        require(id.startsWith("custom_"))
+        saveProfiles(profiles().filterNot { it.id == id })
+        prefs.edit().apply {
+            listOf("encrypted_api_key", "endpoint", "protocol", "model", "route", "image_mode", "image_api", "web", "reasoning", "router_profile", "reasoning_format",
+                "balance_path", "balance_field", "balance_unit")
+                .forEach { remove("${it}_$id") }
+        }.apply()
+    }
+
+    private fun saveProfiles(profiles: List<ConnectionProfile>) {
+        val array = JSONArray()
+        profiles.forEach { array.put(JSONObject().put("id", it.id).put("name", it.name)) }
+        set("connection_profiles", array.toString())
+    }
 
     fun loadKey(provider: String = "anthropic"): String = runCatching {
         val encoded = string("encrypted_api_key_$provider", if (provider == "anthropic") string("encrypted_api_key") else "")
@@ -54,14 +89,26 @@ class LocalStore(private val context: Context) {
     }.getOrDefault("")
 
     fun saveKey(value: String, provider: String = "anthropic") {
+        prefs.edit().apply { putEncryptedKey(value, provider) }.apply()
+    }
+
+    fun saveConnection(endpoint: String, key: String, provider: String) {
+        prefs.edit().apply {
+            putEncryptedKey(key, provider)
+            putString("endpoint_$provider", endpoint)
+        }.apply()
+    }
+
+    private fun android.content.SharedPreferences.Editor.putEncryptedKey(value: String, provider: String) {
         if (value.isBlank()) {
-            prefs.edit().remove("encrypted_api_key_$provider").apply()
+            remove("encrypted_api_key_$provider")
+            if (provider == "anthropic") remove("encrypted_api_key")
             return
         }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, secretKey())
         val bytes = cipher.iv + cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-        set("encrypted_api_key_$provider", Base64.encodeToString(bytes, Base64.NO_WRAP))
+        putString("encrypted_api_key_$provider", Base64.encodeToString(bytes, Base64.NO_WRAP))
     }
 
     private fun secretKey(): SecretKey {
@@ -81,7 +128,7 @@ class LocalStore(private val context: Context) {
 
     fun loadChats(): List<Conversation> = runCatching {
         val file = context.getFileStreamPath("chats.json")
-        if (!file.exists()) {
+        if (!file.exists() && !java.io.File(file.path + ".bak").exists()) {
             val legacy = string("chats", "[]")
             val arr = JSONArray(legacy)
             val migrated = (0 until arr.length()).map { i ->
@@ -102,8 +149,18 @@ class LocalStore(private val context: Context) {
             }
             if (migrated.isNotEmpty()) saveChats(migrated)
             migrated
-        } else decodeChats(file.readText())
-    }.getOrDefault(emptyList())
+        } else decodeChats(android.util.AtomicFile(file).openRead().bufferedReader().use { it.readText() })
+    }.getOrElse { failure ->
+        // Preserve the original before a new conversation can overwrite damaged history.
+        val file = context.getFileStreamPath("chats.json")
+        val preserved = runCatching {
+            if (file.exists()) file.copyTo(context.getFileStreamPath("chats-recovery-${System.currentTimeMillis()}.json"))
+        }.isSuccess
+        historyError = "Не удалось прочитать историю. " +
+            (if (preserved) "Исходный файл сохранён для восстановления. " else "Ошибка резервного копирования. ") +
+            failure.message.orEmpty()
+        emptyList()
+    }
 
     fun saveChats(chats: List<Conversation>) {
         val json = JSONArray()
@@ -127,6 +184,10 @@ class LocalStore(private val context: Context) {
                         .put("role", m.role)
                         .put("text", m.text)
                         .put("timestamp", m.timestamp)
+                        .put("model", m.model)
+                        .put("status", m.status)
+                        .put("reasoning", m.reasoning)
+                        .put("reasoningRequested", m.reasoningRequested)
                         .put("attachments", attachments)
                 )
             }
@@ -164,6 +225,10 @@ class LocalStore(private val context: Context) {
                         role = m.getString("role"),
                         text = m.optString("text"),
                         timestamp = m.optLong("timestamp", 0L),
+                        model = m.optString("model"),
+                        status = m.optString("status", "complete"),
+                        reasoning = m.optString("reasoning"),
+                        reasoningRequested = m.optBoolean("reasoningRequested"),
                         attachments = decodeAttachments(m.optJSONArray("attachments"))
                     )
                 },
